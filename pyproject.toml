@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+
+name = "kmer_artifact_correction"
+version = "0.0.1"
+description = """
+A short python utility for eliminating k-mer artifacts caused by primer
+mismatching.
+"""
+authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
+license = { file = "LICENSE" }
+urls = { homepage = "https://github.com/adamyhe/kmer_artifact_correction" }
+dependencies = ["numpy", "pandas", "pyBigWig", "tqdm", "numba"]
+
+[tool.setuptools]
+packages = ["kmer_artifact_correction"]
+
+[project.scripts]
+kmer_artifact_correction = "src.kmer_artifact_correction:wrapper"
