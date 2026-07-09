@@ -1,22 +1,54 @@
 [build-system]
-requires = ["setuptools>=42"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-
-name = "kmer_artifact_correction"
-version = "0.0.1"
-description = """
-A short python utility for eliminating k-mer artifacts caused by primer
-mismatching.
-"""
+name = "kackle"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "A short python utility for eliminating k-mer artifacts caused by primer mismatching."
+readme = "README.md"
 authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
-license = { file = "LICENSE" }
-urls = { homepage = "https://github.com/adamyhe/kmer_artifact_correction" }
-dependencies = ["numpy", "pandas", "pyBigWig", "tqdm", "numba"]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["bioinformatics", "bigwig", "genomics", "kmer"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = ["numpy", "pandas", "pybigtools", "tqdm", "numba"]
 
-[tool.setuptools]
-packages = ["kmer_artifact_correction"]
+[dependency-groups]
+dev = ["pytest"]
 
 [project.scripts]
-kmer_artifact_correction = "src.kmer_artifact_correction:wrapper"
+kackle = "kackle.cli:wrapper"
+
+[project.urls]
+Homepage = "https://github.com/adamyhe/kackle"
+Repository = "https://github.com/adamyhe/kackle"
+Issues = "https://github.com/adamyhe/kackle/issues"
+
+[project.optional-dependencies]
+fast-motifs = [
+    "ahocorasick-rs>=1.0.3",
+    "pyfastx>=2.3.1",
+]
+
+[tool.hatch.build]
+exclude = [
+    "/.uv-cache",
+    "/.venv",
+    "/dist",
+    "/CLAUDE.md",
+    "/AGENTS.md",
+    "/src/**/*.egg-info",
+    "/src/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kackle"]
