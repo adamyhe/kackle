@@ -7,7 +7,6 @@ from kackle.motifs import (
     locate_motif_specs,
     mismatch_variants,
     parse_motif_spec,
-    reverse_complement,
 )
 
 
@@ -42,10 +41,6 @@ def test_mismatch_variants_validates_motif_bases():
         mismatch_variants("", 0)
     with pytest.raises(ValueError, match="Unsupported motif bases"):
         mismatch_variants("TGN", 0)
-
-
-def test_reverse_complement():
-    assert reverse_complement("TGGAA") == "TTCCA"
 
 
 def test_locate_motif_emits_bed6_style_overlapping_and_reverse_hits(tmp_path):
@@ -112,8 +107,6 @@ def test_fasta_motif_site_provider_locates_one_chromosome_at_a_time(tmp_path):
         fasta,
         ["TGG:0", "TGGAA:1"],
         both_strands=True,
-        fasta_backend="python",
-        match_backend="python",
     )
 
     tgg_bed, tggaa_bed = provider.for_chrom("chr2")

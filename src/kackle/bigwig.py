@@ -8,45 +8,6 @@ representations and on-disk bigWig files.
 import pybigtools
 
 
-def open_bigwig(path, mode="r"):
-    """Open a bigWig file with ``pybigtools``.
-
-    Parameters
-    ----------
-    path : str or path-like
-        Path to the bigWig file.
-    mode : {"r", "w"}
-        Open mode passed through to ``pybigtools.open``.
-
-    Returns
-    -------
-    object
-        A ``pybigtools`` bigWig reader or writer.
-    """
-    return pybigtools.open(path, mode)
-
-
-def read_chrom_values(bw, chrom):
-    """Return dense per-base values for one chromosome.
-
-    Missing bigWig intervals are filled with ``0.0``, which matches the read
-    coverage interpretation used throughout kackle.
-
-    Parameters
-    ----------
-    bw : object
-        Open ``pybigtools`` bigWig reader.
-    chrom : str
-        Chromosome or contig name.
-
-    Returns
-    -------
-    np.ndarray
-        Dense signal vector with length equal to the chromosome size.
-    """
-    return bw.values(chrom, 0, bw.chroms(chrom), fillna=0.0)
-
-
 def write_bigwig(bed_df, bw_fname, chrom_sizes):
     """Write nonzero per-base signal intervals to a bigWig.
 
@@ -67,7 +28,7 @@ def write_bigwig(bed_df, bw_fname, chrom_sizes):
             ["chrom", "start", "end", "value"]
         ].itertuples(index=False, name=None)
     )
-    bw = open_bigwig(bw_fname, "w")
+    bw = pybigtools.open(bw_fname, "w")
     try:
         bw.write(chrom_sizes, entries)
     except Exception:

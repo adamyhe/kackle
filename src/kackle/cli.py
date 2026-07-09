@@ -7,12 +7,14 @@ order to the same in-memory chromosome signal before writing output.
 
 import argparse
 import gc
+import textwrap
 
 import numpy as np
 import pandas as pd
+import pybigtools
 import tqdm
 
-from kackle.bigwig import open_bigwig, read_chrom_values, write_bigwig
+from kackle.bigwig import write_bigwig
 from kackle.computation import correct_kmers
 from kackle.motifs import FastaMotifSiteProvider
 
@@ -20,11 +22,39 @@ from kackle.motifs import FastaMotifSiteProvider
 DEFAULT_MOTIFS = ("TGG:0", "TGGAA:1")
 
 
+class KackleArgumentFormatter(
+    argparse.RawDescriptionHelpFormatter,
+):
+    """Format CLI help with preserved examples and useful defaults only."""
+
+    def _get_help_string(self, action):
+        """Append defaults for meaningful optional values."""
+        help_text = action.help
+        if help_text is argparse.SUPPRESS:
+            return help_text
+        if "%(default)" in help_text:
+            return help_text
+        if action.default not in (argparse.SUPPRESS, None, False):
+            return f"{help_text} (default: %(default)s)"
+        return help_text
+
+
 def read_bed6(bed6_fname):
     """Read a BED6 file with kmer candidate sites."""
-    bed = pd.read_csv(bed6_fname, sep="\t", header=None)
-    bed.columns = ["chrom", "start", "end", "name", "score", "strand"]
-    return bed
+    return pd.read_csv(
+        bed6_fname,
+        sep="\t",
+        header=None,
+        names=["chrom", "start", "end", "name", "score", "strand"],
+        dtype={
+            "chrom": "string",
+            "start": np.int32,
+            "end": np.int32,
+            "name": "string",
+            "score": np.int32,
+            "strand": "string",
+        },
+    )
 
 
 def bed_starts_for_strand(bed, chrom, strand):
@@ -34,13 +64,11 @@ def bed_starts_for_strand(bed, chrom, strand):
     minus-strand rows, it corrects around the motif end, matching the original
     BED6 preprocessing convention.
     """
-    bed = bed[(bed.chrom == chrom) & (bed.strand == strand)].copy()
     if strand == "+":
-        bed["end"] = bed["start"] + 1
+        starts = bed.loc[(bed.chrom == chrom) & (bed.strand == strand), "start"]
     else:
-        bed["start"] = bed["end"]
-        bed["end"] = bed["start"] + 1
-    return bed.start.to_numpy().astype(np.int32)
+        starts = bed.loc[(bed.chrom == chrom) & (bed.strand == strand), "end"]
+    return starts.to_numpy(dtype=np.int32, copy=False)
 
 
 def kmer_resample(
@@ -100,14 +128,14 @@ def kmer_resample(
 
     dfs = []
 
-    bw = open_bigwig(bw_fname)
+    bw = pybigtools.open(bw_fname)
     try:
         for chrom in tqdm.tqdm(
             chroms,
             disable=not verbose,
             desc=f"Correcting {'plus' if strand == '+' else 'minus'} strand kmers",
         ):
-            values = read_chrom_values(bw, chrom).astype(np.int32)
+            values = bw.values(chrom, 0, bw.chroms(chrom), fillna=0.0).astype(np.int32)
             if strand == "-":
                 values = np.abs(values)
             corrected_signal = values
@@ -125,15 +153,17 @@ def kmer_resample(
                     threshold,
                     strand,
                 )
-            corrected_df = pd.DataFrame(
-                {
-                    "chrom": chrom,
-                    "start": np.arange(corrected_signal.shape[0]),
-                    "end": np.arange(corrected_signal.shape[0]) + 1,
-                    "value": corrected_signal.astype(np.float64),
-                }
+            nonzero_starts = np.flatnonzero(corrected_signal > 0).astype(np.int32)
+            dfs.append(
+                pd.DataFrame(
+                    {
+                        "chrom": np.full(nonzero_starts.shape[0], chrom, dtype=object),
+                        "start": nonzero_starts,
+                        "end": nonzero_starts + 1,
+                        "value": corrected_signal[nonzero_starts].astype(np.float64),
+                    }
+                )
             )
-            dfs.append(corrected_df[corrected_df.value > 0].reset_index(drop=True))
     finally:
         bw.close()
 
@@ -142,53 +172,177 @@ def kmer_resample(
 
 def parse_args():
     """Parse command-line arguments for the ``kackle`` console script."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--in_pl_bw", type=str, required=True)
-    parser.add_argument("-I", "--in_mn_bw", type=str, required=True)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Correct strand-specific bigWig signal tracks by resampling coverage "
+            "around recurrent short k-mer artifact sites."
+        ),
+        epilog=textwrap.dedent(
+            f"""\
+            Examples:
+              kackle -i plus.bw -I minus.bw -b sites.bed6 \\
+                -o corrected.plus.bw -O corrected.minus.bw -c chrom.sizes
+
+              kackle -i plus.bw -I minus.bw -f genome.fa \\
+                -o corrected.plus.bw -O corrected.minus.bw -c chrom.sizes
+
+            FASTA mode defaults to motif passes {', '.join(DEFAULT_MOTIFS)} and
+            locates sites one chromosome at a time using pyfastx plus
+            ahocorasick-rs.
+            """
+        ),
+        formatter_class=KackleArgumentFormatter,
+    )
+    parser.add_argument(
+        "-i",
+        "--in_pl_bw",
+        metavar="BIGWIG",
+        type=str,
+        required=True,
+        help="Input plus-strand bigWig signal to correct.",
+    )
+    parser.add_argument(
+        "-I",
+        "--in_mn_bw",
+        metavar="BIGWIG",
+        type=str,
+        required=True,
+        help=(
+            "Input minus-strand bigWig signal to correct. Values are converted "
+            "to absolute counts before correction."
+        ),
+    )
     sites = parser.add_mutually_exclusive_group(required=True)
-    sites.add_argument("-b", "--bed6", type=str)
-    sites.add_argument("-f", "--fasta", type=str)
-    parser.add_argument("-o", "--out_pl_bw", type=str, required=True)
-    parser.add_argument("-O", "--out_mn_bw", type=str, required=True)
-    parser.add_argument("-c", "--chrom_sizes", type=str, required=True)
+    sites.add_argument(
+        "-b",
+        "--bed6",
+        metavar="BED6",
+        type=str,
+        help=(
+            "Precomputed BED6 motif locations. Plus-strand rows use start "
+            "anchors; minus-strand rows use end anchors."
+        ),
+    )
+    sites.add_argument(
+        "-f",
+        "--fasta",
+        metavar="FASTA",
+        type=str,
+        help=(
+            "Reference FASTA used to locate motif sites directly. This avoids "
+            "a separate seqkit locate preprocessing step."
+        ),
+    )
+    parser.add_argument(
+        "-o",
+        "--out_pl_bw",
+        metavar="BIGWIG",
+        type=str,
+        required=True,
+        help="Output path for the corrected plus-strand bigWig.",
+    )
+    parser.add_argument(
+        "-O",
+        "--out_mn_bw",
+        metavar="BIGWIG",
+        type=str,
+        required=True,
+        help="Output path for the corrected minus-strand bigWig.",
+    )
+    parser.add_argument(
+        "-c",
+        "--chrom_sizes",
+        metavar="TSV",
+        type=str,
+        required=True,
+        help=(
+            "Two-column chromosome sizes file used to order chromosomes and "
+            "write the output bigWigs."
+        ),
+    )
     parser.add_argument(
         "-k",
         "--motif",
+        metavar="KMER[:MISMATCHES]",
         action="append",
         default=None,
-        help="Motif spec for FASTA location as KMER[:MISMATCHES]. May be repeated.",
+        help=(
+            "Motif pass for FASTA mode. Use KMER for exact matching or "
+            "KMER:N for up to N mismatches. May be repeated; order is the "
+            "correction order. Defaults to TGG:0 then TGGAA:1."
+        ),
     )
     parser.add_argument(
         "-P",
         "--only-positive-strand",
         action="store_true",
-        help="Only locate motifs on the positive strand when using --fasta.",
+        help=(
+            "In FASTA mode, locate only forward-strand motif matches instead "
+            "of searching both motif and reverse-complement matches."
+        ),
     )
     parser.add_argument(
         "--fasta-backend",
         choices=["auto", "python", "pyfastx"],
-        default="python",
-        help="FASTA reader for --fasta mode.",
+        default="pyfastx",
+        help=(
+            "FASTA reader for --fasta mode. pyfastx is the default indexed "
+            "reader; python is a simple fallback useful for debugging."
+        ),
     )
     parser.add_argument(
         "--motif-match-backend",
         choices=["auto", "python", "ahocorasick"],
-        default="python",
-        help="Pattern matcher for --fasta mode.",
+        default="ahocorasick",
+        help=(
+            "Pattern matcher for --fasta mode. ahocorasick scans all expanded "
+            "mismatch variants together; python repeats str.find per variant."
+        ),
     )
-    parser.add_argument("-s", "--source", type=int, default=10)
-    parser.add_argument("-t", "--target", type=int, default=5)
-    parser.add_argument("-r", "--threshold", type=int, default=10)
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "-s",
+        "--source",
+        metavar="BP",
+        type=int,
+        default=10,
+        help=(
+            "Half-window size around a candidate motif used to estimate local "
+            "source coverage."
+        ),
+    )
+    parser.add_argument(
+        "-t",
+        "--target",
+        metavar="BP",
+        type=int,
+        default=5,
+        help=(
+            "Half-window size around a candidate motif resampled during "
+            "correction."
+        ),
+    )
+    parser.add_argument(
+        "-r",
+        "--threshold",
+        metavar="COUNT",
+        type=int,
+        default=10,
+        help=(
+            "Minimum suspicious signal at the strand-specific artifact anchor "
+            "before a motif site is corrected."
+        ),
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show per-chromosome progress bars while correcting.",
+    )
     args = parser.parse_args()
     if args.bed6 and args.motif:
         parser.error("--motif can only be used with --fasta")
     if args.bed6 and args.only_positive_strand:
         parser.error("--only-positive-strand can only be used with --fasta")
-    if args.bed6 and args.fasta_backend != "python":
-        parser.error("--fasta-backend can only be used with --fasta")
-    if args.bed6 and args.motif_match_backend != "python":
-        parser.error("--motif-match-backend can only be used with --fasta")
     return args
 
 

@@ -2,7 +2,7 @@
 
 The benchmark creates a synthetic multi-record FASTA, locates the default
 kackle motifs on the last chromosome, and compares the pure-Python scanner
-against optional ``pyfastx`` and ``ahocorasick-rs`` backends.
+against the default ``pyfastx`` and ``ahocorasick-rs`` backends.
 """
 
 from __future__ import annotations
@@ -74,10 +74,10 @@ def main() -> None:
         write_fasta(fasta, args.records, args.length)
         chrom = f"chr{args.records}"
         combinations = [
+            ("pyfastx", "ahocorasick"),
             ("python", "python"),
             ("python", "ahocorasick"),
             ("pyfastx", "python"),
-            ("pyfastx", "ahocorasick"),
         ]
         results = []
         for fasta_backend, match_backend in combinations:
@@ -86,13 +86,13 @@ def main() -> None:
             )
             results.append((fasta_backend, match_backend, elapsed, counts))
 
-    baseline = results[0][2]
-    print("fasta_backend\tmatch_backend\tseconds\tspeedup\thits")
+    default_time = results[0][2]
+    print("fasta_backend\tmatch_backend\tseconds\tvs_default\thits")
     for fasta_backend, match_backend, elapsed, counts in results:
-        speedup = baseline / elapsed
+        relative = default_time / elapsed
         print(
             f"{fasta_backend}\t{match_backend}\t"
-            f"{elapsed:.6f}\t{speedup:.2f}x\t{counts}"
+            f"{elapsed:.6f}\t{relative:.2f}x\t{counts}"
         )
 
 

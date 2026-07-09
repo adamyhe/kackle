@@ -20,7 +20,15 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
-dependencies = ["numpy", "pandas", "pybigtools", "tqdm", "numba"]
+dependencies = [
+    "numpy",
+    "pandas",
+    "pybigtools",
+    "tqdm",
+    "numba",
+    "ahocorasick-rs>=1.0.3",
+    "pyfastx>=2.3.1",
+]
 
 [dependency-groups]
 dev = ["pytest"]
@@ -32,12 +40,6 @@ kackle = "kackle.cli:wrapper"
 Homepage = "https://github.com/adamyhe/kackle"
 Repository = "https://github.com/adamyhe/kackle"
 Issues = "https://github.com/adamyhe/kackle/issues"
-
-[project.optional-dependencies]
-fast-motifs = [
-    "ahocorasick-rs>=1.0.3",
-    "pyfastx>=2.3.1",
-]
 
 [tool.hatch.build]
 exclude = [

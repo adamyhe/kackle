@@ -5,9 +5,9 @@ short artifact motifs kackle corrects. It performs case-insensitive exact
 matching after expanding a motif to all sequences within a Hamming-distance
 neighborhood, then emits BED6-style rows with 0-based half-open coordinates.
 
-The command-line workflow uses :class:`FastaMotifSiteProvider` to locate motifs
-one chromosome at a time. That avoids materializing whole-genome motif BEDs for
-the very common short artifact motifs.
+The command-line workflow uses :class:`FastaMotifSiteProvider` with pyfastx and
+ahocorasick-rs to locate motifs one chromosome at a time. That avoids
+materializing whole-genome motif BEDs for the very common short artifact motifs.
 """
 
 from dataclasses import dataclass, field
@@ -38,11 +38,6 @@ def parse_motif_spec(spec):
     if max_mismatches < 0:
         raise ValueError("Motif mismatches must be >= 0")
     return motif, max_mismatches
-
-
-def reverse_complement(seq):
-    """Return the reverse complement of a DNA sequence."""
-    return seq.translate(RC_TABLE)[::-1]
 
 
 def mismatch_variants(pattern, max_mismatches):
@@ -107,59 +102,41 @@ def iter_fasta_records(path):
         yield name, "".join(chunks)
 
 
-def iter_pattern_hits(sequence, pattern):
-    """Yield all 0-based starts for ``pattern`` in ``sequence``, including overlaps."""
-    start = sequence.find(pattern)
-    while start != -1:
-        yield start
-        start = sequence.find(pattern, start + 1)
-
-
-def _empty_bed():
-    """Return an empty BED6 DataFrame with stable columns."""
-    return pd.DataFrame([], columns=BED6_COLUMNS)
-
-
 def _sort_bed(rows):
     """Return BED6 rows as a deterministically sorted DataFrame."""
     if not rows:
-        return _empty_bed()
+        return pd.DataFrame([], columns=BED6_COLUMNS)
     bed = pd.DataFrame(rows, columns=BED6_COLUMNS)
     return bed.sort_values(["chrom", "strand", "start", "end"]).reset_index(drop=True)
 
 
-def _has_module(module_name):
-    """Return whether an optional import is available."""
-    try:
-        __import__(module_name)
-    except ImportError:
-        return False
-    return True
-
-
 def resolve_match_backend(match_backend):
-    """Resolve ``auto`` to the fastest available motif-matching backend."""
+    """Resolve a motif matching backend name."""
     if match_backend == "auto":
-        if _has_module("ahocorasick_rs"):
-            return "ahocorasick"
-        return "python"
+        return "ahocorasick"
     if match_backend not in {"python", "ahocorasick"}:
         raise ValueError("Match backend must be 'auto', 'python', or 'ahocorasick'")
-    if match_backend == "ahocorasick" and not _has_module("ahocorasick_rs"):
-        raise ImportError("Install kackle[fast-motifs] to use ahocorasick matching")
+    if match_backend == "ahocorasick":
+        try:
+            import ahocorasick_rs  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "ahocorasick-rs is required for the default matching backend"
+            ) from exc
     return match_backend
 
 
 def resolve_fasta_backend(fasta_backend):
-    """Resolve ``auto`` to the fastest available FASTA sequence backend."""
+    """Resolve a FASTA sequence backend name."""
     if fasta_backend == "auto":
-        if _has_module("pyfastx"):
-            return "pyfastx"
-        return "python"
+        return "pyfastx"
     if fasta_backend not in {"python", "pyfastx"}:
         raise ValueError("FASTA backend must be 'auto', 'python', or 'pyfastx'")
-    if fasta_backend == "pyfastx" and not _has_module("pyfastx"):
-        raise ImportError("Install kackle[fast-motifs] to use pyfastx FASTA access")
+    if fasta_backend == "pyfastx":
+        try:
+            import pyfastx  # noqa: F401
+        except ImportError as exc:
+            raise ImportError("pyfastx is required for the default FASTA backend") from exc
     return fasta_backend
 
 
@@ -187,7 +164,10 @@ def _ahocorasick_hits(sequence, patterns):
 def _python_hits(sequence, patterns):
     """Yield overlapping starts for any pattern with repeated C-backed finds."""
     for pattern in patterns:
-        yield from iter_pattern_hits(sequence, pattern)
+        start = sequence.find(pattern)
+        while start != -1:
+            yield start
+            start = sequence.find(pattern, start + 1)
 
 
 def locate_motif_in_sequence(
@@ -196,7 +176,7 @@ def locate_motif_in_sequence(
     motif,
     max_mismatches=0,
     both_strands=True,
-    match_backend="python",
+    match_backend="ahocorasick",
 ):
     """Locate a motif in one sequence and return BED6-style hits.
 
@@ -217,9 +197,9 @@ def locate_motif_in_sequence(
     both_strands : bool
         If true, search both motif variants and their reverse complements.
     match_backend : {"auto", "python", "ahocorasick"}
-        Pattern matching engine. ``python`` uses repeated C-backed
-        ``str.find`` calls; ``ahocorasick`` scans all expanded variants in one
-        pass per strand.
+        Pattern matching engine. ``ahocorasick`` is the default and scans all
+        expanded variants in one pass per strand. ``python`` is retained as a
+        simple comparison backend using repeated C-backed ``str.find`` calls.
 
     Returns
     -------
@@ -231,7 +211,7 @@ def locate_motif_in_sequence(
     sequence = sequence.upper()
     match_backend = resolve_match_backend(match_backend)
     variants = mismatch_variants(motif, max_mismatches)
-    rc_variants = {reverse_complement(variant) for variant in variants}
+    rc_variants = {variant.translate(RC_TABLE)[::-1] for variant in variants}
     rows = []
     seen = set()
     hit_fn = _ahocorasick_hits if match_backend == "ahocorasick" else _python_hits
@@ -259,13 +239,14 @@ def locate_motif(
     motif,
     max_mismatches=0,
     both_strands=True,
-    match_backend="python",
+    match_backend="ahocorasick",
 ):
     """Locate a motif in a FASTA file and return BED6-style hits.
 
     This compatibility helper scans every FASTA record and materializes all
     hits. Prefer :class:`FastaMotifSiteProvider` for whole-genome correction,
-    because it emits one chromosome's hits at a time.
+    because it uses indexed FASTA access and emits one chromosome's hits at a
+    time.
     """
     rows = []
     for chrom, sequence in iter_fasta_records(fasta_fname):
@@ -288,38 +269,36 @@ class MotifSpec:
     motif: str
     max_mismatches: int = 0
 
-    @classmethod
-    def parse(cls, spec):
-        """Parse a ``KMER[:MISMATCHES]`` string into a motif spec."""
-        motif, max_mismatches = parse_motif_spec(spec)
-        return cls(motif.upper(), max_mismatches)
-
 
 @dataclass
 class FastaMotifSiteProvider:
     """Locate motif BED rows for one chromosome at a time.
 
-    The provider reads only the requested FASTA record and returns an ordered
-    list of BED6 DataFrames, one per motif spec. That preserves kackle's
-    sequential short-then-long correction behavior without holding whole-genome
-    motif locations in memory.
+    The provider reads only the requested FASTA record with pyfastx and returns
+    an ordered list of BED6 DataFrames, one per motif spec. That preserves
+    kackle's sequential short-then-long correction behavior without holding
+    whole-genome motif locations in memory.
     """
 
     fasta_fname: str
     motif_specs: list[MotifSpec | str]
     both_strands: bool = True
-    fasta_backend: FastaBackend = "python"
-    match_backend: MatchBackend = "python"
+    fasta_backend: FastaBackend = "pyfastx"
+    match_backend: MatchBackend = "ahocorasick"
     _pyfastx_fasta: object | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         """Normalize backend choices and motif specs after construction."""
         self.fasta_backend = resolve_fasta_backend(self.fasta_backend)
         self.match_backend = resolve_match_backend(self.match_backend)
-        self.motif_specs = [
-            spec if isinstance(spec, MotifSpec) else MotifSpec.parse(spec)
-            for spec in self.motif_specs
-        ]
+        parsed_specs = []
+        for spec in self.motif_specs:
+            if isinstance(spec, MotifSpec):
+                parsed_specs.append(spec)
+            else:
+                motif, max_mismatches = parse_motif_spec(spec)
+                parsed_specs.append(MotifSpec(motif.upper(), max_mismatches))
+        self.motif_specs = parsed_specs
 
     def sequence(self, chrom):
         """Return the requested chromosome sequence."""
@@ -353,7 +332,7 @@ def locate_motif_specs(
     fasta_fname,
     motif_specs,
     both_strands=True,
-    match_backend="python",
+    match_backend="ahocorasick",
 ):
     """Locate an ordered list of motif specs in a FASTA file.
 

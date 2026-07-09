@@ -1,0 +1,45 @@
+name: Publish
+
+on:
+  release:
+    types: ["published"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Run tests
+        env:
+          NUMBA_NUM_THREADS: "4"
+        run: uv run pytest
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish package
+        run: uv publish --trusted-publishing always
