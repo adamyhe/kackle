@@ -10,10 +10,13 @@ import pybigtools
 from kackle.cli_common import (
     DEFAULT_MOTIFS,
     KackleArgumentFormatter,
+    bigwig_chrom_names,
+    intersect_ordered,
     read_bed6,
     read_chrom_sizes,
 )
 from kackle.motifs import FastaMotifSiteProvider
+from kackle.motifs import fasta_chrom_names
 
 
 def motif_beds_from_fasta(
@@ -73,7 +76,10 @@ def metaplot_profile(before_bw, after_bw, sites, flank, absolute=False):
 
     for chrom, center in sites.itertuples(index=False, name=None):
         center = int(center)
-        chrom_size = before_bw.chroms(chrom)
+        try:
+            chrom_size = min(before_bw.chroms(chrom), after_bw.chroms(chrom))
+        except KeyError:
+            continue
         left = max(0, center - flank)
         right = min(chrom_size, center + flank + 1)
         if left >= right:
@@ -154,8 +160,10 @@ def write_strand_metaplots(
         before_bw = pybigtools.open(before_fname)
         after_bw = pybigtools.open(after_fname)
         try:
+            available_chroms = set(before_bw.chroms()).intersection(after_bw.chroms())
+            strand_sites = sites[strand].loc[sites[strand].chrom.isin(available_chroms)]
             x, before, after, counts = metaplot_profile(
-                before_bw, after_bw, sites[strand], flank, absolute=absolute
+                before_bw, after_bw, strand_sites, flank, absolute=absolute
             )
         finally:
             before_bw.close()
@@ -276,6 +284,14 @@ def run_metaplot():
         bed = read_bed6(args.bed6)
     else:
         chroms = [chrom for chrom, _ in read_chrom_sizes(args.chrom_sizes)]
+        chroms = intersect_ordered(
+            chroms,
+            bigwig_chrom_names(args.before_pl_bw),
+            bigwig_chrom_names(args.before_mn_bw),
+            bigwig_chrom_names(args.after_pl_bw),
+            bigwig_chrom_names(args.after_mn_bw),
+            fasta_chrom_names(args.fasta),
+        )
         bed = motif_beds_from_fasta(
             args.fasta,
             args.motif or DEFAULT_MOTIFS,

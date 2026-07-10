@@ -8,6 +8,7 @@ from kackle.bigwig import write_bigwig
 from kackle.plotting import (
     metaplot_profile,
     parse_metaplot_args,
+    run_metaplot,
     write_strand_metaplots,
 )
 
@@ -86,6 +87,85 @@ def test_write_strand_metaplots_writes_separate_pngs(tmp_path):
         out_path = tmp_path / out_fname if not str(out_fname).startswith("/") else out_fname
         with open(out_path, "rb") as handle:
             assert handle.read(8) == b"\x89PNG\r\n\x1a\n"
+
+
+def test_write_strand_metaplots_skips_sites_missing_from_bigwig_pair(tmp_path):
+    chrom_sizes = [("chr1", 10)]
+    before_pl = tmp_path / "before.plus.bw"
+    before_mn = tmp_path / "before.minus.bw"
+    after_pl = tmp_path / "after.plus.bw"
+    after_mn = tmp_path / "after.minus.bw"
+    signal = pd.DataFrame(
+        {"chrom": ["chr1"], "start": [2], "end": [3], "value": [1.0]}
+    )
+    write_bigwig(signal, before_pl, chrom_sizes)
+    write_bigwig(signal.assign(value=[-1.0]), before_mn, chrom_sizes)
+    write_bigwig(signal, after_pl, chrom_sizes)
+    write_bigwig(signal.assign(value=[-1.0]), after_mn, chrom_sizes)
+    bed = pd.DataFrame(
+        [
+            ("chr1", 2, 5, "motif", 0, "+"),
+            ("chr2", 2, 5, "motif", 0, "+"),
+            ("chr2", 2, 5, "motif", 0, "-"),
+        ],
+        columns=["chrom", "start", "end", "name", "score", "strand"],
+    )
+
+    outputs = write_strand_metaplots(
+        before_pl, before_mn, after_pl, after_mn, bed, tmp_path / "metaplot", flank=2
+    )
+
+    assert set(outputs) == {"+", "-"}
+
+
+def test_metaplot_fasta_mode_skips_chromosomes_missing_from_bigwigs(
+    tmp_path, monkeypatch
+):
+    chrom_sizes = [("chr1", 10)]
+    before_pl = tmp_path / "before.plus.bw"
+    before_mn = tmp_path / "before.minus.bw"
+    after_pl = tmp_path / "after.plus.bw"
+    after_mn = tmp_path / "after.minus.bw"
+    fasta = tmp_path / "genome.fa"
+    chrom_sizes_file = tmp_path / "chrom.sizes"
+    signal = pd.DataFrame(
+        {"chrom": ["chr1"], "start": [2], "end": [3], "value": [1.0]}
+    )
+    write_bigwig(signal, before_pl, chrom_sizes)
+    write_bigwig(signal.assign(value=[-1.0]), before_mn, chrom_sizes)
+    write_bigwig(signal, after_pl, chrom_sizes)
+    write_bigwig(signal.assign(value=[-1.0]), after_mn, chrom_sizes)
+    fasta.write_text(">chr1\nAATGGAAAAA\n>chr2\nAATGGA\n")
+    chrom_sizes_file.write_text("chr1\t10\nchr2\t6\n")
+    argv = [
+        "kackle-metaplot",
+        "--before-pl-bw",
+        str(before_pl),
+        "--before-mn-bw",
+        str(before_mn),
+        "--after-pl-bw",
+        str(after_pl),
+        "--after-mn-bw",
+        str(after_mn),
+        "-f",
+        str(fasta),
+        "-c",
+        str(chrom_sizes_file),
+        "--motif",
+        "TGG:0",
+        "--fasta-backend",
+        "python",
+        "--motif-match-backend",
+        "python",
+        "-o",
+        str(tmp_path / "metaplot"),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    run_metaplot()
+
+    assert (tmp_path / "metaplot.plus.png").exists()
+    assert (tmp_path / "metaplot.minus.png").exists()
 
 
 def test_metaplot_cli_requires_chrom_sizes_with_fasta(monkeypatch):

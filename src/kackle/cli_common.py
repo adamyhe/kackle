@@ -4,6 +4,7 @@ import argparse
 
 import numpy as np
 import pandas as pd
+import pybigtools
 
 
 DEFAULT_MOTIFS = ("TGG:0", "TGGAA:1")
@@ -51,3 +52,21 @@ def read_chrom_sizes(chrom_sizes_fname):
     )
     return [(chrom, int(size)) for chrom, size in chrom_sizes.itertuples(index=False)]
 
+
+def bigwig_chrom_names(bw_fname):
+    """Return chromosome names present in a bigWig."""
+    bw = pybigtools.open(bw_fname)
+    try:
+        return list(bw.chroms().keys())
+    finally:
+        bw.close()
+
+
+def intersect_ordered(items, *chrom_name_sets, key=None):
+    """Filter ordered items to chromosomes present in every supplied source."""
+    if key is None:
+        key = lambda item: item
+    common = {key(item) for item in items}
+    for chrom_names in chrom_name_sets:
+        common &= set(chrom_names)
+    return [item for item in items if key(item) in common]

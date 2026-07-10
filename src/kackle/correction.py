@@ -16,6 +16,8 @@ from kackle.bigwig import write_bigwig
 from kackle.cli_common import (
     DEFAULT_MOTIFS,
     KackleArgumentFormatter,
+    bigwig_chrom_names,
+    intersect_ordered,
     read_bed6,
     read_chrom_sizes,
 )
@@ -69,37 +71,6 @@ def resolve_numba_threads(numba_threads, chrom_workers):
     return max(1, thread_budget() // chrom_workers)
 
 
-def bigwig_chrom_names(bw_fname):
-    """Return chromosome names present in a bigWig."""
-    bw = pybigtools.open(bw_fname)
-    try:
-        return list(bw.chroms().keys())
-    finally:
-        bw.close()
-
-
-def intersect_chrom_sizes(chrom_sizes, *chrom_name_sets):
-    """Filter chromosome sizes to names present in every supplied source."""
-    common = set(chrom for chrom, _ in chrom_sizes)
-    for chrom_names in chrom_name_sets:
-        common &= set(chrom_names)
-    return [(chrom, size) for chrom, size in chrom_sizes if chrom in common]
-
-
-def bed_starts_for_strand(bed, chrom, strand):
-    """Return strand-specific correction anchors for one chromosome.
-
-    For plus-strand BED rows, kackle corrects around the motif start. For
-    minus-strand rows, it corrects around the motif end, matching the original
-    BED6 preprocessing convention.
-    """
-    if strand == "+":
-        starts = bed.loc[(bed.chrom == chrom) & (bed.strand == strand), "start"]
-    else:
-        starts = bed.loc[(bed.chrom == chrom) & (bed.strand == strand), "end"]
-    return starts.to_numpy(dtype=np.int32, copy=False)
-
-
 def motif_bed6_fnames(out_prefix, motif_specs):
     """Return deterministic BED6 output names for ordered motif specs."""
     bed6_fnames = []
@@ -124,22 +95,18 @@ def _chrom_motif_beds(motif_site_provider, chrom, isolate_fasta=False):
     return motif_site_provider.for_chrom(chrom)
 
 
-def motif_beds_for_chrom(motif_beds, chrom):
-    """Return motif BED tables restricted to one chromosome."""
-    if motif_beds is None:
-        return None
-    return [bed.loc[bed.chrom == chrom].copy() for bed in motif_beds]
-
-
-def motif_start_arrays_for_strand(motif_beds, strand):
-    """Return ordered motif anchor arrays for one strand."""
+def motif_anchor_arrays(motif_beds, strand, chrom=None):
+    """Return ordered motif anchor arrays for one strand and optional chromosome."""
     if motif_beds is None:
         return []
     anchor_col = "start" if strand == "+" else "end"
-    return [
-        bed.loc[bed.strand == strand, anchor_col].to_numpy(dtype=np.int32, copy=True)
-        for bed in motif_beds
-    ]
+    arrays = []
+    for bed in motif_beds:
+        keep = bed.strand == strand
+        if chrom is not None:
+            keep &= bed.chrom == chrom
+        arrays.append(bed.loc[keep, anchor_col].to_numpy(dtype=np.int32, copy=True))
+    return arrays
 
 
 def _append_motif_beds_for_chrom(motif_site_provider, chrom, beds):
@@ -189,7 +156,7 @@ def _correct_chromosome(
             chrom,
             isolate_fasta=isolate_fasta_provider,
         )
-        motif_start_arrays = motif_start_arrays_for_strand(chrom_motif_beds, strand)
+        motif_start_arrays = motif_anchor_arrays(chrom_motif_beds, strand)
     else:
         chrom_motif_beds = motif_beds or []
         motif_start_arrays = motif_start_arrays or []
@@ -297,10 +264,7 @@ def kmer_resample(
             chrom_motif_beds = None
             chrom_start_arrays = None
             if motif_site_provider is None:
-                chrom_motif_beds = motif_beds_for_chrom(motif_beds, chrom)
-                chrom_start_arrays = motif_start_arrays_for_strand(
-                    chrom_motif_beds, strand
-                )
+                chrom_start_arrays = motif_anchor_arrays(motif_beds, strand, chrom)
             _, corrected_df, chrom_motif_beds = _correct_chromosome(
                 bw_fname,
                 chrom,
@@ -326,9 +290,7 @@ def kmer_resample(
     for chrom in chroms:
         chrom_start_arrays = None
         if motif_site_provider is None:
-            chrom_start_arrays = motif_start_arrays_for_strand(
-                motif_beds_for_chrom(motif_beds, chrom), strand
-            )
+            chrom_start_arrays = motif_anchor_arrays(motif_beds, strand, chrom)
         task_args.append((chrom, chrom_start_arrays))
 
     with executor_class(max_workers=chrom_workers) as executor:
@@ -589,7 +551,9 @@ def run_correction():
     ]
     if args.fasta:
         chrom_sources.append(fasta_chrom_names(args.fasta))
-    chrom_sizes = intersect_chrom_sizes(chrom_sizes, *chrom_sources)
+    chrom_sizes = intersect_ordered(
+        chrom_sizes, *chrom_sources, key=lambda chrom_size: chrom_size[0]
+    )
     if not chrom_sizes:
         raise ValueError(
             "No chromosomes are present in the intersection of chrom.sizes, "

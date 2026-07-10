@@ -3,20 +3,7 @@ import pandas as pd
 import pytest
 
 import kackle.correction as cli
-
-
-def test_bed_starts_for_strand_uses_kmer_start_for_plus_and_end_for_minus():
-    bed = pd.DataFrame(
-        [
-            ("chr1", 2, 5, "motif", 0, "+"),
-            ("chr1", 7, 10, "motif", 0, "-"),
-            ("chr2", 11, 14, "motif", 0, "+"),
-        ],
-        columns=["chrom", "start", "end", "name", "score", "strand"],
-    )
-
-    assert cli.bed_starts_for_strand(bed, "chr1", "+").tolist() == [2]
-    assert cli.bed_starts_for_strand(bed, "chr1", "-").tolist() == [10]
+from kackle.cli_common import intersect_ordered
 
 
 def test_motif_bed6_fnames_are_ordered_and_descriptive():
@@ -39,45 +26,26 @@ def test_auto_worker_resolution_respects_numba_thread_budget(monkeypatch):
 def test_intersect_chrom_sizes_preserves_chrom_size_order():
     chrom_sizes = [("chr1", 10), ("chr2", 20), ("chr3", 30)]
 
-    assert cli.intersect_chrom_sizes(
+    assert intersect_ordered(
         chrom_sizes,
         ["chr2", "chr1"],
         ["chr1", "chr3", "chr2"],
+        key=lambda chrom_size: chrom_size[0],
     ) == [("chr1", 10), ("chr2", 20)]
 
 
-def test_motif_beds_for_chrom_filters_each_pass():
-    bed1 = pd.DataFrame(
-        [
-            ("chr1", 1, 4, "short", 0, "+"),
-            ("chr2", 2, 5, "short", 0, "+"),
-        ],
-        columns=["chrom", "start", "end", "name", "score", "strand"],
-    )
-    bed2 = pd.DataFrame(
-        [
-            ("chr2", 3, 8, "long", 0, "-"),
-            ("chr1", 4, 9, "long", 0, "-"),
-        ],
-        columns=["chrom", "start", "end", "name", "score", "strand"],
-    )
-
-    chrom_beds = cli.motif_beds_for_chrom([bed1, bed2], "chr1")
-
-    assert [bed.start.tolist() for bed in chrom_beds] == [[1], [4]]
-
-
-def test_motif_start_arrays_for_strand_uses_strand_specific_anchor():
+def test_motif_anchor_arrays_use_chrom_and_strand_specific_anchor():
     bed = pd.DataFrame(
         [
             ("chr1", 1, 4, "motif", 0, "+"),
             ("chr1", 5, 8, "motif", 0, "-"),
+            ("chr2", 9, 12, "motif", 0, "+"),
         ],
         columns=["chrom", "start", "end", "name", "score", "strand"],
     )
 
-    plus_starts = cli.motif_start_arrays_for_strand([bed], "+")
-    minus_starts = cli.motif_start_arrays_for_strand([bed], "-")
+    plus_starts = cli.motif_anchor_arrays([bed], "+", "chr1")
+    minus_starts = cli.motif_anchor_arrays([bed], "-", "chr1")
 
     assert plus_starts[0].tolist() == [1]
     assert minus_starts[0].tolist() == [8]
@@ -230,11 +198,6 @@ def test_kmer_resample_uses_precomputed_start_arrays(monkeypatch):
     )
     calls = []
     monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
-    monkeypatch.setattr(
-        cli,
-        "bed_starts_for_strand",
-        lambda *args: pytest.fail("pandas start filtering should not run"),
-    )
 
     def fake_correct_kmers(values, starts, source, target, threshold, strand):
         calls.append(starts.tolist())
