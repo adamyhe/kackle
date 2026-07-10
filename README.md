@@ -56,8 +56,11 @@ To save the generated motif sites while using FASTA mode, add
 By default, kackle uses `--chrom-workers auto` to process multiple chromosomes
 concurrently. Auto mode uses up to four chromosome workers, honors
 `NUMBA_NUM_THREADS` as the total thread budget, and divides numba threads across
-the chromosome workers. Set `--chrom-workers 1` for serial chromosome
-processing, or tune `--numba-threads N` explicitly.
+the chromosome workers. The CLI uses `--worker-backend process` by default so
+FASTA matching, pandas filtering, and numba kernels can run in separate Python
+interpreters. Set `--worker-backend thread` for lower process overhead, set
+`--chrom-workers 1` for serial chromosome processing, or tune
+`--numba-threads N` explicitly.
 
 kackle processes chromosomes present in the intersection of `chrom.sizes`, both
 input bigWigs, and the FASTA file when FASTA mode is used. Chromosomes absent

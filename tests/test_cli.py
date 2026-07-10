@@ -46,6 +46,43 @@ def test_intersect_chrom_sizes_preserves_chrom_size_order():
     ) == [("chr1", 10), ("chr2", 20)]
 
 
+def test_motif_beds_for_chrom_filters_each_pass():
+    bed1 = pd.DataFrame(
+        [
+            ("chr1", 1, 4, "short", 0, "+"),
+            ("chr2", 2, 5, "short", 0, "+"),
+        ],
+        columns=["chrom", "start", "end", "name", "score", "strand"],
+    )
+    bed2 = pd.DataFrame(
+        [
+            ("chr2", 3, 8, "long", 0, "-"),
+            ("chr1", 4, 9, "long", 0, "-"),
+        ],
+        columns=["chrom", "start", "end", "name", "score", "strand"],
+    )
+
+    chrom_beds = cli.motif_beds_for_chrom([bed1, bed2], "chr1")
+
+    assert [bed.start.tolist() for bed in chrom_beds] == [[1], [4]]
+
+
+def test_motif_start_arrays_for_strand_uses_strand_specific_anchor():
+    bed = pd.DataFrame(
+        [
+            ("chr1", 1, 4, "motif", 0, "+"),
+            ("chr1", 5, 8, "motif", 0, "-"),
+        ],
+        columns=["chrom", "start", "end", "name", "score", "strand"],
+    )
+
+    plus_starts = cli.motif_start_arrays_for_strand([bed], "+")
+    minus_starts = cli.motif_start_arrays_for_strand([bed], "-")
+
+    assert plus_starts[0].tolist() == [1]
+    assert minus_starts[0].tolist() == [8]
+
+
 def test_kmer_resample_applies_motif_beds_sequentially(monkeypatch):
     class FakeBigWig:
         def chroms(self, chrom):
@@ -174,6 +211,46 @@ def test_kmer_resample_parallel_chrom_workers_match_serial(monkeypatch):
     )
 
     assert parallel.to_dict("records") == serial.to_dict("records")
+
+
+def test_kmer_resample_uses_precomputed_start_arrays(monkeypatch):
+    class FakeBigWig:
+        def chroms(self, chrom):
+            return 4
+
+        def values(self, chrom, start, end, fillna=0.0):
+            return np.array([0, 1, 0, 2])
+
+        def close(self):
+            pass
+
+    bed = pd.DataFrame(
+        [("chr1", 1, 4, "motif", 0, "+")],
+        columns=["chrom", "start", "end", "name", "score", "strand"],
+    )
+    calls = []
+    monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
+    monkeypatch.setattr(
+        cli,
+        "bed_starts_for_strand",
+        lambda *args: pytest.fail("pandas start filtering should not run"),
+    )
+
+    def fake_correct_kmers(values, starts, source, target, threshold, strand):
+        calls.append(starts.tolist())
+        return values
+
+    monkeypatch.setattr(cli, "correct_kmers", fake_correct_kmers)
+
+    cli.kmer_resample(
+        "signal.bw",
+        motif_beds=[bed],
+        strand="+",
+        chroms=["chr1"],
+        verbose=False,
+    )
+
+    assert calls == [[1]]
 
 
 def test_kmer_resample_auto_chrom_workers_match_serial(monkeypatch):
@@ -318,6 +395,21 @@ def test_kmer_resample_rejects_invalid_chrom_workers():
         )
 
 
+def test_kmer_resample_rejects_invalid_worker_backend():
+    with pytest.raises(ValueError, match="worker_backend"):
+        cli.kmer_resample(
+            "signal.bw",
+            motif_beds=[
+                pd.DataFrame(
+                    [],
+                    columns=["chrom", "start", "end", "name", "score", "strand"],
+                )
+            ],
+            worker_backend="bogus",
+            verbose=False,
+        )
+
+
 def test_parse_args_rejects_fasta_only_options_with_bed(monkeypatch):
     argv = [
         "kackle",
@@ -414,6 +506,7 @@ def test_parse_args_defaults_to_fast_fasta_backends(monkeypatch):
     assert args.motif_match_backend == "ahocorasick"
     assert args.chrom_workers == "auto"
     assert args.numba_threads == "auto"
+    assert args.worker_backend == "process"
 
 
 def test_parse_args_help_describes_modes_and_defaults(monkeypatch, capsys):
@@ -433,3 +526,4 @@ def test_parse_args_help_describes_modes_and_defaults(monkeypatch, capsys):
     assert "(default: ahocorasick)" in help_text
     assert "--chrom-workers" in help_text
     assert "--numba-threads" in help_text
+    assert "--worker-backend" in help_text

@@ -5,7 +5,7 @@ import gc
 import os
 import re
 import textwrap
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -124,6 +124,24 @@ def _chrom_motif_beds(motif_site_provider, chrom, isolate_fasta=False):
     return motif_site_provider.for_chrom(chrom)
 
 
+def motif_beds_for_chrom(motif_beds, chrom):
+    """Return motif BED tables restricted to one chromosome."""
+    if motif_beds is None:
+        return None
+    return [bed.loc[bed.chrom == chrom].copy() for bed in motif_beds]
+
+
+def motif_start_arrays_for_strand(motif_beds, strand):
+    """Return ordered motif anchor arrays for one strand."""
+    if motif_beds is None:
+        return []
+    anchor_col = "start" if strand == "+" else "end"
+    return [
+        bed.loc[bed.strand == strand, anchor_col].to_numpy(dtype=np.int32, copy=True)
+        for bed in motif_beds
+    ]
+
+
 def _append_motif_beds_for_chrom(motif_site_provider, chrom, beds):
     """Append generated FASTA motif beds once, preserving chromosome order."""
     if not isinstance(motif_site_provider, FastaMotifSiteProvider):
@@ -141,14 +159,21 @@ def _correct_chromosome(
     bw_fname,
     chrom,
     motif_beds,
+    motif_start_arrays,
     motif_site_provider,
     strand,
     source,
     target,
     threshold,
     isolate_fasta_provider=False,
+    numba_threads=None,
 ):
     """Correct one chromosome and return sparse output plus motif beds used."""
+    if numba_threads is not None:
+        from numba import set_num_threads
+
+        set_num_threads(numba_threads)
+
     bw = pybigtools.open(bw_fname)
     try:
         values = bw.values(chrom, 0, bw.chroms(chrom), fillna=0.0).astype(np.int32)
@@ -158,19 +183,23 @@ def _correct_chromosome(
     if strand == "-":
         values = np.abs(values)
     corrected_signal = values
-    chrom_motif_beds = (
-        _chrom_motif_beds(
+    if motif_site_provider is not None:
+        chrom_motif_beds = _chrom_motif_beds(
             motif_site_provider,
             chrom,
             isolate_fasta=isolate_fasta_provider,
         )
-        if motif_site_provider is not None
-        else motif_beds
-    )
-    for bed in chrom_motif_beds:
+        motif_start_arrays = motif_start_arrays_for_strand(chrom_motif_beds, strand)
+    else:
+        chrom_motif_beds = motif_beds or []
+        motif_start_arrays = motif_start_arrays or []
+
+    for starts in motif_start_arrays:
+        if starts.shape[0] == 0:
+            continue
         corrected_signal = correct_kmers(
             corrected_signal,
-            bed_starts_for_strand(bed, chrom, strand),
+            starts,
             source,
             target,
             threshold,
@@ -200,6 +229,8 @@ def kmer_resample(
     target=5,
     threshold=10,
     chrom_workers=1,
+    worker_backend="thread",
+    numba_threads=None,
     verbose=True,
 ):
     """Correct one strand-specific bigWig and return nonzero output intervals.
@@ -226,6 +257,12 @@ def kmer_resample(
     chrom_workers : int
         Number of chromosomes to correct concurrently. Each worker opens its
         own bigWig handle. Use ``1`` to disable cross-chromosome parallelism.
+    worker_backend : {"thread", "process"}
+        Executor backend for chromosome workers. ``process`` can improve CPU
+        use for mixed Python/native FASTA workflows; ``thread`` avoids
+        pickling large in-memory BED tables for library callers.
+    numba_threads : int, optional
+        Threads available to numba inside each chromosome worker.
     verbose : bool
         Whether to show a progress bar.
 
@@ -237,6 +274,8 @@ def kmer_resample(
     """
     if strand not in ["+", "-"]:
         raise ValueError("Strand must be '+' or '-'")
+    if worker_backend not in {"thread", "process"}:
+        raise ValueError("worker_backend must be 'thread' or 'process'")
     if motif_beds is None and motif_site_provider is None:
         if bed6_fname is None:
             raise ValueError(
@@ -255,37 +294,60 @@ def kmer_resample(
             disable=not verbose,
             desc=f"Correcting {'plus' if strand == '+' else 'minus'} strand kmers",
         ):
+            chrom_motif_beds = None
+            chrom_start_arrays = None
+            if motif_site_provider is None:
+                chrom_motif_beds = motif_beds_for_chrom(motif_beds, chrom)
+                chrom_start_arrays = motif_start_arrays_for_strand(
+                    chrom_motif_beds, strand
+                )
             _, corrected_df, chrom_motif_beds = _correct_chromosome(
                 bw_fname,
                 chrom,
-                motif_beds,
+                None,
+                chrom_start_arrays,
                 motif_site_provider,
                 strand,
                 source,
                 target,
                 threshold,
                 False,
+                numba_threads,
             )
             _append_motif_beds_for_chrom(motif_site_provider, chrom, chrom_motif_beds)
             dfs.append(corrected_df)
         return pd.concat(dfs, ignore_index=True)
 
     results = {}
-    with ThreadPoolExecutor(max_workers=chrom_workers) as executor:
+    executor_class = (
+        ProcessPoolExecutor if worker_backend == "process" else ThreadPoolExecutor
+    )
+    task_args = []
+    for chrom in chroms:
+        chrom_start_arrays = None
+        if motif_site_provider is None:
+            chrom_start_arrays = motif_start_arrays_for_strand(
+                motif_beds_for_chrom(motif_beds, chrom), strand
+            )
+        task_args.append((chrom, chrom_start_arrays))
+
+    with executor_class(max_workers=chrom_workers) as executor:
         futures = {
             executor.submit(
                 _correct_chromosome,
                 bw_fname,
                 chrom,
-                motif_beds,
+                None,
+                chrom_start_arrays,
                 motif_site_provider,
                 strand,
                 source,
                 target,
                 threshold,
                 True,
+                numba_threads,
             ): chrom
-            for chrom in chroms
+            for chrom, chrom_start_arrays in task_args
         }
         for future in tqdm.tqdm(
             as_completed(futures),
@@ -492,6 +554,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--worker-backend",
+        choices=["process", "thread"],
+        default="process",
+        help=(
+            "Chromosome parallelism backend. process uses separate Python "
+            "interpreters for better CPU use in FASTA mode; thread avoids "
+            "pickling large in-memory BED tables."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -526,14 +598,16 @@ def run_correction():
     chroms = [chrom for chrom, _ in chrom_sizes]
     chrom_workers = resolve_chrom_workers(args.chrom_workers, len(chroms))
     numba_threads = resolve_numba_threads(args.numba_threads, chrom_workers)
-    from numba import set_num_threads
+    if chrom_workers == 1 or args.worker_backend == "thread":
+        from numba import set_num_threads
 
-    set_num_threads(numba_threads)
+        set_num_threads(numba_threads)
     if args.verbose:
         print(
             "Using "
             f"{chrom_workers} chromosome worker(s) and "
-            f"{numba_threads} numba thread(s) per worker."
+            f"{numba_threads} numba thread(s) per worker "
+            f"with the {args.worker_backend} backend."
         )
     motif_site_provider = None
     if args.fasta:
@@ -562,6 +636,8 @@ def run_correction():
         target=args.target,
         threshold=args.threshold,
         chrom_workers=chrom_workers,
+        worker_backend=args.worker_backend,
+        numba_threads=numba_threads,
         verbose=args.verbose,
     )
     print("Writing plus strand bigWig ...")
@@ -579,6 +655,8 @@ def run_correction():
         target=args.target,
         threshold=args.threshold,
         chrom_workers=chrom_workers,
+        worker_backend=args.worker_backend,
+        numba_threads=numba_threads,
         verbose=args.verbose,
     )
     print("Writing minus strand bigWig ...")

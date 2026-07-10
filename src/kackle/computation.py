@@ -29,9 +29,9 @@ def artifact_mask_serial(
             continue
         suspicious_signal_idx = start - 1 if strand == "+" else start
         suspicious_signal = chromosome_signal_vector[suspicious_signal_idx]
-        neighborhood_sum = np.sum(
-            chromosome_signal_vector[start - source : start + source]
-        )
+        neighborhood_sum = 0
+        for j in range(start - source, start + source):
+            neighborhood_sum += chromosome_signal_vector[j]
         suspicious_background = (neighborhood_sum - suspicious_signal) / (source * 2 - 1)
         if suspicious_signal > threshold * suspicious_background:
             pass_threshold[i] = True
@@ -54,9 +54,9 @@ def artifact_mask_parallel(
             continue
         suspicious_signal_idx = start - 1 if strand == "+" else start
         suspicious_signal = chromosome_signal_vector[suspicious_signal_idx]
-        neighborhood_sum = np.sum(
-            chromosome_signal_vector[start - source : start + source]
-        )
+        neighborhood_sum = 0
+        for j in range(start - source, start + source):
+            neighborhood_sum += chromosome_signal_vector[j]
         suspicious_background = (neighborhood_sum - suspicious_signal) / (source * 2 - 1)
         if suspicious_signal > threshold * suspicious_background:
             pass_threshold[i] = True
@@ -127,24 +127,39 @@ def correct_kmers(
 ) -> np.array:
     """Correct suspicious kmer-centered signal spikes in a dense vector.
 
-    Candidate starts are screened against their local background. Passing
-    windows are replaced with ``resample_dirmult`` output; all other positions
-    are left unchanged.
+    Candidate starts are screened, resampled, and written back in one fused
+    parallel pass. Thresholds and flanking totals are read from the input vector
+    for this motif pass, while only the central target window is updated in the
+    returned copy.
     """
     out_vec = chromosome_signal_vector.copy()
-    starts = starts[artifact_mask_parallel(out_vec, starts, source, threshold, strand)]
+    if starts.shape[0] == 0:
+        return out_vec
 
-    suspicious_signal_windows = np.zeros(
-        (starts.shape[0], source * 2), dtype=chromosome_signal_vector.dtype
-    )
+    alpha = np.ones(target * 2)
+    signal_len = len(chromosome_signal_vector)
     for i in prange(starts.shape[0]):
         start = starts[i]
-        suspicious_signal_windows[i] = out_vec[start - source : start + source]
+        if start - source < 0 or start + source > signal_len:
+            continue
+        suspicious_signal_idx = start - 1 if strand == "+" else start
+        suspicious_signal = chromosome_signal_vector[suspicious_signal_idx]
+        neighborhood_sum = 0
+        left_flank_sum = 0
+        right_flank_sum = 0
+        for j in range(start - source, start + source):
+            value = chromosome_signal_vector[j]
+            neighborhood_sum += value
+            if j < start - target:
+                left_flank_sum += value
+            elif j >= start + target:
+                right_flank_sum += value
+        suspicious_background = (neighborhood_sum - suspicious_signal) / (source * 2 - 1)
+        if suspicious_signal <= threshold * suspicious_background:
+            continue
 
-    corrected_signal_windows = resample_dirmult(
-        suspicious_signal_windows, source=source, target=target
-    )
-    for i in prange(starts.shape[0]):
-        start = starts[i]
-        out_vec[start - source : start + source] = corrected_signal_windows[i]
+        probs = np.random.dirichlet(alpha)
+        resampled = np.random.multinomial(left_flank_sum + right_flank_sum, probs)
+        for j in range(target * 2):
+            out_vec[start - target + j] = resampled[j]
     return out_vec
