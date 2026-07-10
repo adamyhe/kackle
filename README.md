@@ -50,6 +50,18 @@ kackle -i plus.bw -I minus.bw -f genome.fa \
 
 Custom motif order can be supplied with repeated `--motif KMER[:MISMATCHES]` flags.
 
+Generate before/after metaplots centered on motif starts:
+
+```bash
+kackle-metaplot \
+  --before-pl-bw plus.bw --before-mn-bw minus.bw \
+  --after-pl-bw out.plus.bw --after-mn-bw out.minus.bw \
+  -f genome.fa -c chrom.sizes -o correction.metaplot
+```
+
+This writes `correction.metaplot.plus.png` and `correction.metaplot.minus.png`.
+BED6 motif sites can be supplied with `-b sites.bed6` instead of FASTA.
+
 ## Benchmarking
 
 To reproduce motif-backend timings:

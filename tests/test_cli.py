@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from kackle import cli
+import kackle.correction as cli
 
 
 def test_bed_starts_for_strand_uses_kmer_start_for_plus_and_end_for_minus():

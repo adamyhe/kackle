@@ -1,9 +1,4 @@
-"""Command-line entry points and orchestration for kackle.
-
-The CLI can consume precomputed BED6 motif locations or locate motifs directly
-from FASTA. When multiple motif beds are supplied, corrections are applied in
-order to the same in-memory chromosome signal before writing output.
-"""
+"""Correction workflow and command-line entry point for kackle."""
 
 import argparse
 import gc
@@ -15,46 +10,14 @@ import pybigtools
 import tqdm
 
 from kackle.bigwig import write_bigwig
+from kackle.cli_common import (
+    DEFAULT_MOTIFS,
+    KackleArgumentFormatter,
+    read_bed6,
+    read_chrom_sizes,
+)
 from kackle.computation import correct_kmers
 from kackle.motifs import FastaMotifSiteProvider
-
-
-DEFAULT_MOTIFS = ("TGG:0", "TGGAA:1")
-
-
-class KackleArgumentFormatter(
-    argparse.RawDescriptionHelpFormatter,
-):
-    """Format CLI help with preserved examples and useful defaults only."""
-
-    def _get_help_string(self, action):
-        """Append defaults for meaningful optional values."""
-        help_text = action.help
-        if help_text is argparse.SUPPRESS:
-            return help_text
-        if "%(default)" in help_text:
-            return help_text
-        if action.default not in (argparse.SUPPRESS, None, False):
-            return f"{help_text} (default: %(default)s)"
-        return help_text
-
-
-def read_bed6(bed6_fname):
-    """Read a BED6 file with kmer candidate sites."""
-    return pd.read_csv(
-        bed6_fname,
-        sep="\t",
-        header=None,
-        names=["chrom", "start", "end", "name", "score", "strand"],
-        dtype={
-            "chrom": "string",
-            "start": np.int32,
-            "end": np.int32,
-            "name": "string",
-            "score": np.int32,
-            "strand": "string",
-        },
-    )
 
 
 def bed_starts_for_strand(bed, chrom, strand):
@@ -346,16 +309,10 @@ def parse_args():
     return args
 
 
-def wrapper():
+def run_correction():
     """Run the command-line correction workflow."""
     args = parse_args()
-    chrom_sizes = pd.read_csv(
-        args.chrom_sizes, sep="\t", header=None, names=["chrom", "size"]
-    )
-    chrom_sizes = [
-        (chrom, int(size))
-        for chrom, size in zip(chrom_sizes["chrom"], chrom_sizes["size"])
-    ]
+    chrom_sizes = read_chrom_sizes(args.chrom_sizes)
     chroms = [chrom for chrom, _ in chrom_sizes]
     motif_site_provider = None
     if args.fasta:
@@ -396,7 +353,3 @@ def wrapper():
     )
     print("Writing minus strand bigWig ...")
     write_bigwig(mn_bg, args.out_mn_bw, chrom_sizes)
-
-
-if __name__ == "__main__":
-    wrapper()

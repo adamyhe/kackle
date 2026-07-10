@@ -4,7 +4,7 @@ import pandas as pd
 import pybigtools
 
 from kackle.bigwig import write_bigwig
-from kackle.cli import wrapper
+from kackle.correction import run_correction
 
 
 def write_text(path, text):
@@ -65,7 +65,7 @@ def test_cli_fasta_mode_generates_motifs_and_writes_bigwigs(tmp_path, monkeypatc
     ]
     monkeypatch.setattr(sys, "argv", argv)
 
-    wrapper()
+    run_correction()
 
     assert plus_out.exists()
     assert minus_out.exists()
