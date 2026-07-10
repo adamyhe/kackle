@@ -143,15 +143,11 @@ def parse_args():
         epilog=textwrap.dedent(
             f"""\
             Examples:
-              kackle -i plus.bw -I minus.bw -b sites.bed6 \\
-                -o corrected.plus.bw -O corrected.minus.bw -c chrom.sizes
+              kackle -i plus.bw -I minus.bw -b sites.bed6 -o corrected.plus.bw -O corrected.minus.bw -c chrom.sizes
 
-              kackle -i plus.bw -I minus.bw -f genome.fa \\
-                -o corrected.plus.bw -O corrected.minus.bw -c chrom.sizes
+              kackle -i plus.bw -I minus.bw -f genome.fa -o corrected.plus.bw -O corrected.minus.bw -c chrom.sizes
 
-            FASTA mode defaults to motif passes {', '.join(DEFAULT_MOTIFS)} and
-            locates sites one chromosome at a time using pyfastx plus
-            ahocorasick-rs.
+            FASTA mode defaults to motif passes {", ".join(DEFAULT_MOTIFS)} and locates sites one chromosome at a time using pyfastx plus ahocorasick-rs.
             """
         ),
         formatter_class=KackleArgumentFormatter,
@@ -279,10 +275,7 @@ def parse_args():
         metavar="BP",
         type=int,
         default=5,
-        help=(
-            "Half-window size around a candidate motif resampled during "
-            "correction."
-        ),
+        help=("Half-window size around a candidate motif resampled during correction."),
     )
     parser.add_argument(
         "-r",
