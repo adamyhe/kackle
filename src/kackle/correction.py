@@ -21,6 +21,7 @@ from kackle.cli_common import (
 )
 from kackle.computation import correct_kmers
 from kackle.motifs import FastaMotifSiteProvider
+from kackle.motifs import fasta_chrom_names
 from kackle.motifs import parse_motif_spec
 
 
@@ -66,6 +67,23 @@ def resolve_numba_threads(numba_threads, chrom_workers):
             raise ValueError("numba_threads must be >= 1")
         return numba_threads
     return max(1, thread_budget() // chrom_workers)
+
+
+def bigwig_chrom_names(bw_fname):
+    """Return chromosome names present in a bigWig."""
+    bw = pybigtools.open(bw_fname)
+    try:
+        return list(bw.chroms().keys())
+    finally:
+        bw.close()
+
+
+def intersect_chrom_sizes(chrom_sizes, *chrom_name_sets):
+    """Filter chromosome sizes to names present in every supplied source."""
+    common = set(chrom for chrom, _ in chrom_sizes)
+    for chrom_names in chrom_name_sets:
+        common &= set(chrom_names)
+    return [(chrom, size) for chrom, size in chrom_sizes if chrom in common]
 
 
 def bed_starts_for_strand(bed, chrom, strand):
@@ -493,6 +511,18 @@ def run_correction():
     """Run the command-line correction workflow."""
     args = parse_args()
     chrom_sizes = read_chrom_sizes(args.chrom_sizes)
+    chrom_sources = [
+        bigwig_chrom_names(args.in_pl_bw),
+        bigwig_chrom_names(args.in_mn_bw),
+    ]
+    if args.fasta:
+        chrom_sources.append(fasta_chrom_names(args.fasta))
+    chrom_sizes = intersect_chrom_sizes(chrom_sizes, *chrom_sources)
+    if not chrom_sizes:
+        raise ValueError(
+            "No chromosomes are present in the intersection of chrom.sizes, "
+            "input bigWigs, and FASTA when provided"
+        )
     chroms = [chrom for chrom, _ in chrom_sizes]
     chrom_workers = resolve_chrom_workers(args.chrom_workers, len(chroms))
     numba_threads = resolve_numba_threads(args.numba_threads, chrom_workers)

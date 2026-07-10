@@ -36,6 +36,16 @@ def test_auto_worker_resolution_respects_numba_thread_budget(monkeypatch):
     assert numba_threads == 4
 
 
+def test_intersect_chrom_sizes_preserves_chrom_size_order():
+    chrom_sizes = [("chr1", 10), ("chr2", 20), ("chr3", 30)]
+
+    assert cli.intersect_chrom_sizes(
+        chrom_sizes,
+        ["chr2", "chr1"],
+        ["chr1", "chr3", "chr2"],
+    ) == [("chr1", 10), ("chr2", 20)]
+
+
 def test_kmer_resample_applies_motif_beds_sequentially(monkeypatch):
     class FakeBigWig:
         def chroms(self, chrom):

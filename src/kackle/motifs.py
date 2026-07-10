@@ -102,6 +102,16 @@ def iter_fasta_records(path):
         yield name, "".join(chunks)
 
 
+def fasta_chrom_names(path):
+    """Return FASTA record names in file order without loading sequences."""
+    names = []
+    with open(path) as handle:
+        for line in handle:
+            if line.startswith(">"):
+                names.append(line[1:].split()[0])
+    return names
+
+
 def _sort_bed(rows):
     """Return BED6 rows as a deterministically sorted DataFrame."""
     if not rows:

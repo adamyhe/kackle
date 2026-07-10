@@ -59,6 +59,10 @@ concurrently. Auto mode uses up to four chromosome workers, honors
 the chromosome workers. Set `--chrom-workers 1` for serial chromosome
 processing, or tune `--numba-threads N` explicitly.
 
+kackle processes chromosomes present in the intersection of `chrom.sizes`, both
+input bigWigs, and the FASTA file when FASTA mode is used. Chromosomes absent
+from any required source are skipped.
+
 Generate before/after metaplots centered on motif starts:
 
 ```bash

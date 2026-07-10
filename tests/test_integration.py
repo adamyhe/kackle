@@ -20,6 +20,14 @@ def read_values(path, chrom, length):
         bw.close()
 
 
+def read_chroms(path):
+    bw = pybigtools.open(path)
+    try:
+        return bw.chroms()
+    finally:
+        bw.close()
+
+
 def test_cli_fasta_mode_generates_motifs_and_writes_bigwigs(tmp_path, monkeypatch):
     chrom_sizes = [("chr1", 40)]
     plus_in = tmp_path / "plus.bw"
@@ -82,3 +90,61 @@ def test_cli_fasta_mode_generates_motifs_and_writes_bigwigs(tmp_path, monkeypatc
     ]
     assert read_values(plus_out, "chr1", 40) == read_values(plus_in, "chr1", 40)
     assert read_values(minus_out, "chr1", 40) == read_values(minus_in, "chr1", 40)
+
+
+def test_cli_skips_chromosomes_missing_from_any_required_file(tmp_path, monkeypatch):
+    input_chrom_sizes = [("chr1", 20)]
+    plus_in = tmp_path / "plus.bw"
+    minus_in = tmp_path / "minus.bw"
+    plus_out = tmp_path / "out.plus.bw"
+    minus_out = tmp_path / "out.minus.bw"
+    bed_prefix = tmp_path / "generated"
+    fasta = write_text(
+        tmp_path / "genome.fa",
+        ">chr1\nAAAAATGGAAAAAAA\n>chr2\nTGGATGGATGG\n",
+    )
+    chrom_sizes_file = write_text(tmp_path / "chrom.sizes", "chr1\t20\nchr2\t12\n")
+    signal = pd.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "start": [5],
+            "end": [6],
+            "value": [1.0],
+        }
+    )
+    write_bigwig(signal, plus_in, input_chrom_sizes)
+    write_bigwig(signal, minus_in, input_chrom_sizes)
+    argv = [
+        "kackle",
+        "-i",
+        str(plus_in),
+        "-I",
+        str(minus_in),
+        "-f",
+        str(fasta),
+        "-o",
+        str(plus_out),
+        "-O",
+        str(minus_out),
+        "-c",
+        str(chrom_sizes_file),
+        "--motif",
+        "TGG:0",
+        "--source",
+        "2",
+        "--target",
+        "1",
+        "--threshold",
+        "1000",
+        "--out-bed6-prefix",
+        str(bed_prefix),
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    run_correction()
+
+    assert read_chroms(plus_out) == {"chr1": 20}
+    assert read_chroms(minus_out) == {"chr1": 20}
+    assert (tmp_path / "generated.1.TGG.m0.bed6").read_text().splitlines() == [
+        "chr1\t5\t8\tTGG\t0\t+"
+    ]
