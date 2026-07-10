@@ -49,6 +49,15 @@ kackle -i plus.bw -I minus.bw -f genome.fa \
 ```
 
 Custom motif order can be supplied with repeated `--motif KMER[:MISMATCHES]` flags.
+To save the generated motif sites while using FASTA mode, add
+`--out-bed6-prefix PREFIX`. This writes one BED6 file per motif pass, such as
+`PREFIX.1.TGG.m0.bed6` and `PREFIX.2.TGGAA.m1.bed6`.
+
+By default, kackle uses `--chrom-workers auto` to process multiple chromosomes
+concurrently. Auto mode uses up to four chromosome workers, honors
+`NUMBA_NUM_THREADS` as the total thread budget, and divides numba threads across
+the chromosome workers. Set `--chrom-workers 1` for serial chromosome
+processing, or tune `--numba-threads N` explicitly.
 
 Generate before/after metaplots centered on motif starts:
 

@@ -26,6 +26,7 @@ def test_cli_fasta_mode_generates_motifs_and_writes_bigwigs(tmp_path, monkeypatc
     minus_in = tmp_path / "minus.bw"
     plus_out = tmp_path / "out.plus.bw"
     minus_out = tmp_path / "out.minus.bw"
+    bed_prefix = tmp_path / "generated"
     fasta = write_text(tmp_path / "genome.fa", ">chr1\nAAAAATGGATGGAAAAATTCCATGGAAAAAAA\n")
     chrom_sizes_file = write_text(tmp_path / "chrom.sizes", "chr1\t40\n")
     signal = pd.DataFrame(
@@ -62,6 +63,8 @@ def test_cli_fasta_mode_generates_motifs_and_writes_bigwigs(tmp_path, monkeypatc
         "1",
         "--threshold",
         "1000",
+        "--out-bed6-prefix",
+        str(bed_prefix),
     ]
     monkeypatch.setattr(sys, "argv", argv)
 
@@ -69,5 +72,13 @@ def test_cli_fasta_mode_generates_motifs_and_writes_bigwigs(tmp_path, monkeypatc
 
     assert plus_out.exists()
     assert minus_out.exists()
+    assert (tmp_path / "generated.1.TGG.m0.bed6").exists()
+    assert (tmp_path / "generated.2.TGGAA.m1.bed6").exists()
+    assert (tmp_path / "generated.1.TGG.m0.bed6").read_text().splitlines() == [
+        "chr1\t5\t8\tTGG\t0\t+",
+        "chr1\t9\t12\tTGG\t0\t+",
+        "chr1\t22\t25\tTGG\t0\t+",
+        "chr1\t19\t22\tTGG\t0\t-",
+    ]
     assert read_values(plus_out, "chr1", 40) == read_values(plus_in, "chr1", 40)
     assert read_values(minus_out, "chr1", 40) == read_values(minus_in, "chr1", 40)
