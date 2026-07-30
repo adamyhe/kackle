@@ -18,8 +18,8 @@ kackle --help
 Or with `uv`:
 
 ```bash
-uv add kackle
-uv run kackle --help
+uv tool install kackle
+kackle --help
 ```
 
 ## Execution
