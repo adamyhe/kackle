@@ -8,6 +8,10 @@ Kmer Artifact Correction (KACkle) -- A small python utility for eliminating k-me
 
 ## Installation
 
+Requires Python 3.10-3.13. 3.14 isn't supported yet because `pybigtools`'
+PyO3 bindings don't have a 3.14 build; the ceiling will be raised once an
+updated `pybigtools` release lands.
+
 Install with `pip`:
 
 ```bash

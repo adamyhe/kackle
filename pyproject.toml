@@ -4,8 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kackle"
-version = "0.1.0"
-requires-python = ">=3.12"
+version = "0.2.0"
+# Upper bound is capped below 3.14 because pybigtools' PyO3 bindings don't yet
+# support it (no prebuilt wheel, and building from source fails against
+# PyO3 0.22.6's 3.13 ceiling). Raise once an updated pybigtools release lands.
+requires-python = ">=3.10,<3.14"
 description = "A short python utility for eliminating k-mer artifacts caused by primer mismatching."
 readme = "README.md"
 authors = [{ name = "Adam He", email = "adamyhe@gmail.com" }]
@@ -17,7 +20,10 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
@@ -28,7 +34,7 @@ dependencies = [
     "numba",
     "ahocorasick-rs>=1.0.3",
     "pyfastx>=2.3.1",
-    "matplotlib>=3.11.0",
+    "matplotlib>=3.7",
 ]
 
 [dependency-groups]
