@@ -80,6 +80,27 @@ def test_correct_kmers_preserves_signal_when_no_candidates_pass_threshold():
     assert np.array_equal(corrected, signal)
 
 
+def test_correct_kmers_preserves_signal_with_no_candidates():
+    signal = np.ones(200, dtype=np.int32)
+    starts = np.array([], dtype=np.int32)
+
+    corrected = correct_kmers(signal, starts, 10, 5, 10, "+")
+
+    assert np.array_equal(corrected, signal)
+
+
+def test_correct_kmers_fused_kernel_only_updates_target_window():
+    signal = np.ones(80, dtype=np.int32)
+    signal[39] = 100
+    starts = np.array([40], dtype=np.int32)
+
+    corrected = correct_kmers(signal, starts, 10, 3, 10, "+")
+    changed = np.flatnonzero(corrected != signal)
+
+    assert set(changed.tolist()) <= set(range(37, 43))
+    assert changed.size > 0
+
+
 def test_parallel_artifact_mask_is_faster_than_serial_baseline():
     if numba.get_num_threads() < 2:
         pytest.skip("parallel speedup requires at least two numba threads")

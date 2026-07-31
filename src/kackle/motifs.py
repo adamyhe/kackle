@@ -102,6 +102,16 @@ def iter_fasta_records(path):
         yield name, "".join(chunks)
 
 
+def fasta_chrom_names(path):
+    """Return FASTA record names in file order without loading sequences."""
+    names = []
+    with open(path) as handle:
+        for line in handle:
+            if line.startswith(">"):
+                names.append(line[1:].split()[0])
+    return names
+
+
 def _sort_bed(rows):
     """Return BED6 rows as a deterministically sorted DataFrame."""
     if not rows:
@@ -285,7 +295,9 @@ class FastaMotifSiteProvider:
     both_strands: bool = True
     fasta_backend: FastaBackend = "pyfastx"
     match_backend: MatchBackend = "ahocorasick"
+    bed6_fnames: list[str] | None = None
     _pyfastx_fasta: object | None = field(default=None, init=False, repr=False)
+    _written_chroms: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self):
         """Normalize backend choices and motif specs after construction."""
@@ -299,6 +311,11 @@ class FastaMotifSiteProvider:
                 motif, max_mismatches = parse_motif_spec(spec)
                 parsed_specs.append(MotifSpec(motif.upper(), max_mismatches))
         self.motif_specs = parsed_specs
+        if self.bed6_fnames is not None:
+            if len(self.bed6_fnames) != len(self.motif_specs):
+                raise ValueError("bed6_fnames must match motif_specs length")
+            for bed6_fname in self.bed6_fnames:
+                open(bed6_fname, "w").close()
 
     def sequence(self, chrom):
         """Return the requested chromosome sequence."""
@@ -315,7 +332,7 @@ class FastaMotifSiteProvider:
     def for_chrom(self, chrom):
         """Return ordered motif BED tables for a single chromosome."""
         sequence = self.sequence(chrom)
-        return [
+        beds = [
             locate_motif_in_sequence(
                 chrom,
                 sequence,
@@ -326,6 +343,11 @@ class FastaMotifSiteProvider:
             )
             for spec in self.motif_specs
         ]
+        if self.bed6_fnames is not None and chrom not in self._written_chroms:
+            for bed, bed6_fname in zip(beds, self.bed6_fnames):
+                bed.to_csv(bed6_fname, sep="\t", header=False, index=False, mode="a")
+            self._written_chroms.add(chrom)
+        return beds
 
 
 def locate_motif_specs(

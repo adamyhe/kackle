@@ -49,6 +49,34 @@ kackle -i plus.bw -I minus.bw -f genome.fa \
 ```
 
 Custom motif order can be supplied with repeated `--motif KMER[:MISMATCHES]` flags.
+To save the generated motif sites while using FASTA mode, add
+`--out-bed6-prefix PREFIX`. This writes one BED6 file per motif pass, such as
+`PREFIX.1.TGG.m0.bed6` and `PREFIX.2.TGGAA.m1.bed6`.
+
+By default, kackle uses `--chrom-workers auto` to process multiple chromosomes
+concurrently. Auto mode uses up to four chromosome workers, honors
+`NUMBA_NUM_THREADS` as the total thread budget, and divides numba threads across
+the chromosome workers. The CLI uses `--worker-backend process` by default so
+FASTA matching, pandas filtering, and numba kernels can run in separate Python
+interpreters. Set `--worker-backend thread` for lower process overhead, set
+`--chrom-workers 1` for serial chromosome processing, or tune
+`--numba-threads N` explicitly.
+
+kackle processes chromosomes present in the intersection of `chrom.sizes`, both
+input bigWigs, and the FASTA file when FASTA mode is used. Chromosomes absent
+from any required source are skipped.
+
+Generate before/after metaplots centered on motif starts:
+
+```bash
+kackle-metaplot \
+  --before-pl-bw plus.bw --before-mn-bw minus.bw \
+  --after-pl-bw out.plus.bw --after-mn-bw out.minus.bw \
+  -f genome.fa -c chrom.sizes -o correction.metaplot
+```
+
+This writes `correction.metaplot.plus.png` and `correction.metaplot.minus.png`.
+BED6 motif sites can be supplied with `-b sites.bed6` instead of FASTA.
 
 ## Benchmarking
 

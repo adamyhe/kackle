@@ -5,7 +5,7 @@ I/O helpers, and the CLI workflow entry point.
 """
 
 from kackle.bigwig import write_bigwig
-from kackle.cli import kmer_resample, wrapper
+from kackle.correction import kmer_resample, run_correction
 from kackle.computation import (
     artifact_mask_parallel,
     artifact_mask_serial,
@@ -20,6 +20,7 @@ from kackle.motifs import (
     locate_motif_specs,
     mismatch_variants,
 )
+from kackle.plotting import metaplot_profile, write_strand_metaplots
 
 __all__ = [
     "artifact_mask_parallel",
@@ -31,8 +32,10 @@ __all__ = [
     "locate_motif_in_sequence",
     "locate_motif_specs",
     "mismatch_variants",
+    "metaplot_profile",
     "resample_dirmult",
     "resample_empirical",
-    "wrapper",
+    "run_correction",
     "write_bigwig",
+    "write_strand_metaplots",
 ]

@@ -28,13 +28,15 @@ dependencies = [
     "numba",
     "ahocorasick-rs>=1.0.3",
     "pyfastx>=2.3.1",
+    "matplotlib>=3.11.0",
 ]
 
 [dependency-groups]
 dev = ["pytest"]
 
 [project.scripts]
-kackle = "kackle.cli:wrapper"
+kackle = "kackle.correction:run_correction"
+kackle-metaplot = "kackle.plotting:run_metaplot"
 
 [project.urls]
 Homepage = "https://github.com/adamyhe/kackle"

@@ -145,6 +145,36 @@ def test_fasta_motif_site_provider_pyfastx_matches_python(tmp_path):
     ]
 
 
+def test_fasta_motif_site_provider_streams_bed6_outputs_once_per_chromosome(tmp_path):
+    fasta = tmp_path / "genome.fa"
+    tgg_bed = tmp_path / "tgg.bed6"
+    tggaa_bed = tmp_path / "tggaa.bed6"
+    write_fasta(fasta, [("chr1", "TGGATGGAA"), ("chr2", "ACCATGG")])
+    provider = FastaMotifSiteProvider(
+        fasta,
+        ["TGG:0", "TGGAA:1"],
+        both_strands=True,
+        fasta_backend="python",
+        match_backend="python",
+        bed6_fnames=[tgg_bed, tggaa_bed],
+    )
+
+    provider.for_chrom("chr1")
+    provider.for_chrom("chr1")
+    provider.for_chrom("chr2")
+
+    assert tgg_bed.read_text().splitlines() == [
+        "chr1\t0\t3\tTGG\t0\t+",
+        "chr1\t4\t7\tTGG\t0\t+",
+        "chr2\t4\t7\tTGG\t0\t+",
+        "chr2\t1\t4\tTGG\t0\t-",
+    ]
+    assert tggaa_bed.read_text().splitlines() == [
+        "chr1\t0\t5\tTGGAA\t0\t+",
+        "chr1\t4\t9\tTGGAA\t0\t+",
+    ]
+
+
 def test_locate_motif_specs_preserves_correction_order(tmp_path):
     fasta = tmp_path / "genome.fa"
     write_fasta(fasta, [("chr1", "TGGATGGAA")])
