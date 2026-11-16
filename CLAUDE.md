@@ -86,12 +86,20 @@ Plus- and minus-strand bigWigs are corrected **independently** (two full passes 
      `correct_kmers()` call over the array, so e.g. the default `TGG:0` pass runs and its output
      feeds the subsequent `TGGAA:1` pass. This ordering is deliberate (short exact matches corrected
      before longer fuzzy ones) and must be preserved.
-   - `correct_kmers()` (`computation.py`, `njit(parallel=True)`) is a fused screen+resample pass:
-     for each candidate anchor it builds a `source`-sized neighborhood (indexed so the "artifact"
-     position is consistently at the strand-appropriate offset), flags it if signal exceeds
-     `threshold * local_background`, and for flagged positions only, redraws the central
-     `target`-sized window with a Dirichlet-multinomial resample of the combined flanking counts —
-     conserving local depth while smoothing the spike.
+   - `correct_kmers()` (`computation.py`, `njit(parallel=True)`) runs in three steps:
+     1. **Screen** every candidate anchor against the pass's input (`artifact_mask_parallel`):
+        flag it if the strand-appropriate artifact position exceeds
+        `threshold * local_background` over its `[anchor - source, anchor + source)` neighborhood.
+     2. **Cluster** sorted flagged anchors closer than `source + target` (`_flagged_clusters`).
+        At that distance one site's flank would overlap another's target window.
+     3. **Resample** each cluster once (prange over clusters): redraw
+        `[first - target, last + target)` with a Dirichlet-multinomial whose total is the sum of
+        the `source - target` flank bases just outside the span, scaled by
+        `span_width / (2 * target)`. An isolated site is a cluster of one (scale factor 1).
+        Clusters are disjoint, so there are no write races and no spike leaks between neighbors.
+     Only target spans are modified. Don't reintroduce per-site write-back of overlapping
+     windows (v0.1.0 wrote full source windows and v0.2.0 wrote overlapping target windows, and
+     both raced and leaked spikes).
    - Output is converted to a sparse `(chrom, start, end, value)` DataFrame, dropping zero rows.
 3. Chromosome results are concatenated and passed to `write_bigwig()`.
 
