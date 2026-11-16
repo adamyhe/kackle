@@ -72,7 +72,13 @@ def test_kmer_resample_applies_motif_beds_sequentially(monkeypatch):
     )
     calls = []
 
-    monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
+    monkeypatch.setattr(
+        cli,
+        "read_chrom_values",
+        lambda path, chrom, n_jobs=1: FakeBigWig().values(
+            chrom, 0, FakeBigWig().chroms(chrom)
+        ),
+    )
 
     def fake_correct_kmers(values, starts, source, target, threshold, strand):
         calls.append((starts.tolist(), strand, values.tolist()))
@@ -122,7 +128,13 @@ def test_kmer_resample_uses_motif_site_provider_per_chromosome(monkeypatch):
     provider = Provider()
     calls = []
 
-    monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
+    monkeypatch.setattr(
+        cli,
+        "read_chrom_values",
+        lambda path, chrom, n_jobs=1: FakeBigWig().values(
+            chrom, 0, FakeBigWig().chroms(chrom)
+        ),
+    )
 
     def fake_correct_kmers(values, starts, source, target, threshold, strand):
         calls.append((starts.tolist(), strand))
@@ -158,7 +170,13 @@ def test_kmer_resample_parallel_chrom_workers_match_serial(monkeypatch):
     empty_bed = pd.DataFrame(
         [], columns=["chrom", "start", "end", "name", "score", "strand"]
     )
-    monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
+    monkeypatch.setattr(
+        cli,
+        "read_chrom_values",
+        lambda path, chrom, n_jobs=1: FakeBigWig().values(
+            chrom, 0, FakeBigWig().chroms(chrom)
+        ),
+    )
     monkeypatch.setattr(cli, "correct_kmers", lambda values, *args: values)
 
     serial = cli.kmer_resample(
@@ -197,7 +215,13 @@ def test_kmer_resample_uses_precomputed_start_arrays(monkeypatch):
         columns=["chrom", "start", "end", "name", "score", "strand"],
     )
     calls = []
-    monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
+    monkeypatch.setattr(
+        cli,
+        "read_chrom_values",
+        lambda path, chrom, n_jobs=1: FakeBigWig().values(
+            chrom, 0, FakeBigWig().chroms(chrom)
+        ),
+    )
 
     def fake_correct_kmers(values, starts, source, target, threshold, strand):
         calls.append(starts.tolist())
@@ -233,7 +257,13 @@ def test_kmer_resample_auto_chrom_workers_match_serial(monkeypatch):
         [], columns=["chrom", "start", "end", "name", "score", "strand"]
     )
     monkeypatch.setenv("NUMBA_NUM_THREADS", "16")
-    monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
+    monkeypatch.setattr(
+        cli,
+        "read_chrom_values",
+        lambda path, chrom, n_jobs=1: FakeBigWig().values(
+            chrom, 0, FakeBigWig().chroms(chrom)
+        ),
+    )
     monkeypatch.setattr(cli, "correct_kmers", lambda values, *args: values)
 
     serial = cli.kmer_resample(
@@ -273,11 +303,16 @@ def test_kmer_resample_parallel_fasta_provider_writes_bed6_once(tmp_path, monkey
     provider = cli.FastaMotifSiteProvider(
         fasta,
         ["TGG:0"],
-        fasta_backend="python",
         match_backend="python",
         bed6_fnames=[bed6],
     )
-    monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
+    monkeypatch.setattr(
+        cli,
+        "read_chrom_values",
+        lambda path, chrom, n_jobs=1: FakeBigWig().values(
+            chrom, 0, FakeBigWig().chroms(chrom)
+        ),
+    )
     monkeypatch.setattr(cli, "correct_kmers", lambda values, *args: values)
 
     cli.kmer_resample(
@@ -316,7 +351,13 @@ def test_kmer_resample_returns_sparse_rows_without_dense_dataframe(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(cli.pybigtools, "open", lambda path: FakeBigWig())
+    monkeypatch.setattr(
+        cli,
+        "read_chrom_values",
+        lambda path, chrom, n_jobs=1: FakeBigWig().values(
+            chrom, 0, FakeBigWig().chroms(chrom)
+        ),
+    )
     monkeypatch.setattr(cli, "correct_kmers", lambda values, *args: values)
 
     out = cli.kmer_resample(
@@ -465,7 +506,6 @@ def test_parse_args_defaults_to_fast_fasta_backends(monkeypatch):
 
     args = cli.parse_args()
 
-    assert args.fasta_backend == "pyfastx"
     assert args.motif_match_backend == "ahocorasick"
     assert args.chrom_workers == "auto"
     assert args.numba_threads == "auto"
@@ -484,8 +524,7 @@ def test_parse_args_help_describes_modes_and_defaults(monkeypatch, capsys):
     assert "Precomputed BED6 motif locations" in help_text
     assert "Reference FASTA used to locate motif sites directly" in help_text
     assert "defaults to motif passes TGG:0, TGGAA:1" in help_text
-    assert "pyfastx plus" in help_text
-    assert "(default: pyfastx)" in help_text
+    assert "pyfaidx plus" in help_text
     assert "(default: ahocorasick)" in help_text
     assert "--chrom-workers" in help_text
     assert "--numba-threads" in help_text

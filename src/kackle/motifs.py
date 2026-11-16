@@ -5,7 +5,7 @@ short artifact motifs kackle corrects. It performs case-insensitive exact
 matching after expanding a motif to all sequences within a Hamming-distance
 neighborhood, then emits BED6-style rows with 0-based half-open coordinates.
 
-The command-line workflow uses :class:`FastaMotifSiteProvider` with pyfastx and
+The command-line workflow uses :class:`FastaMotifSiteProvider` with pyfaidx and
 ahocorasick-rs to locate motifs one chromosome at a time. That avoids
 materializing whole-genome motif BEDs for the very common short artifact motifs.
 """
@@ -20,7 +20,6 @@ import pandas as pd
 DNA_ALPHABET = ("A", "C", "G", "T")
 RC_TABLE = str.maketrans("ACGTNacgtn", "TGCANtgcan")
 BED6_COLUMNS = ["chrom", "start", "end", "name", "score", "strand"]
-FastaBackend = Literal["auto", "python", "pyfastx"]
 MatchBackend = Literal["auto", "python", "ahocorasick"]
 
 
@@ -77,39 +76,24 @@ def mismatch_variants(pattern, max_mismatches):
     return variants
 
 
-def iter_fasta_records(path):
-    """Yield ``(name, sequence)`` records from a FASTA file.
+def open_fasta(path):
+    """Open an indexed FASTA with pyfaidx, building or refreshing its ``.fai``.
 
-    The record name is the first non-whitespace token after ``>``. Sequence
-    lines are concatenated as-is; callers are responsible for uppercasing or
-    validating alphabets.
+    Record names are the first whitespace-delimited token after ``>``.
+    Sequences are returned as plain strings, with case preserved.
     """
-    name = None
-    chunks = []
-    with open(path) as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                if name is not None:
-                    yield name, "".join(chunks)
-                name = line[1:].split()[0]
-                chunks = []
-            else:
-                chunks.append(line)
-    if name is not None:
-        yield name, "".join(chunks)
+    import pyfaidx
+
+    return pyfaidx.Fasta(str(path), as_raw=True)
 
 
 def fasta_chrom_names(path):
-    """Return FASTA record names in file order without loading sequences."""
-    names = []
-    with open(path) as handle:
-        for line in handle:
-            if line.startswith(">"):
-                names.append(line[1:].split()[0])
-    return names
+    """Return FASTA record names in file order, read from the ``.fai`` index."""
+    fasta = open_fasta(path)
+    try:
+        return list(fasta.keys())
+    finally:
+        fasta.close()
 
 
 def _sort_bed(rows):
@@ -134,28 +118,6 @@ def resolve_match_backend(match_backend):
                 "ahocorasick-rs is required for the default matching backend"
             ) from exc
     return match_backend
-
-
-def resolve_fasta_backend(fasta_backend):
-    """Resolve a FASTA sequence backend name."""
-    if fasta_backend == "auto":
-        return "pyfastx"
-    if fasta_backend not in {"python", "pyfastx"}:
-        raise ValueError("FASTA backend must be 'auto', 'python', or 'pyfastx'")
-    if fasta_backend == "pyfastx":
-        try:
-            import pyfastx  # noqa: F401
-        except ImportError as exc:
-            raise ImportError("pyfastx is required for the default FASTA backend") from exc
-    return fasta_backend
-
-
-def _python_fasta_sequence(fasta_fname, chrom):
-    """Read one FASTA record by name using the built-in parser."""
-    for name, sequence in iter_fasta_records(fasta_fname):
-        if name == chrom:
-            return sequence
-    raise KeyError(f"Chromosome {chrom!r} not found in {fasta_fname}")
 
 
 def _ahocorasick_hits(sequence, patterns):
@@ -259,7 +221,9 @@ def locate_motif(
     time.
     """
     rows = []
-    for chrom, sequence in iter_fasta_records(fasta_fname):
+    fasta = open_fasta(fasta_fname)
+    for chrom in fasta.keys():
+        sequence = fasta[chrom][:]
         bed = locate_motif_in_sequence(
             chrom,
             sequence,
@@ -284,7 +248,7 @@ class MotifSpec:
 class FastaMotifSiteProvider:
     """Locate motif BED rows for one chromosome at a time.
 
-    The provider reads only the requested FASTA record with pyfastx and returns
+    The provider reads only the requested FASTA record with pyfaidx and returns
     an ordered list of BED6 DataFrames, one per motif spec. That preserves
     kackle's sequential short-then-long correction behavior without holding
     whole-genome motif locations in memory.
@@ -293,16 +257,17 @@ class FastaMotifSiteProvider:
     fasta_fname: str
     motif_specs: list[MotifSpec | str]
     both_strands: bool = True
-    fasta_backend: FastaBackend = "pyfastx"
     match_backend: MatchBackend = "ahocorasick"
     bed6_fnames: list[str] | None = None
-    _pyfastx_fasta: object | None = field(default=None, init=False, repr=False)
+    _pyfaidx_fasta: object | None = field(default=None, init=False, repr=False)
     _written_chroms: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self):
         """Normalize backend choices and motif specs after construction."""
-        self.fasta_backend = resolve_fasta_backend(self.fasta_backend)
         self.match_backend = resolve_match_backend(self.match_backend)
+        # Build (or refresh) the .fai up front, in the calling process, so
+        # concurrent chromosome workers never race to write it.
+        open_fasta(self.fasta_fname).close()
         parsed_specs = []
         for spec in self.motif_specs:
             if isinstance(spec, MotifSpec):
@@ -319,15 +284,11 @@ class FastaMotifSiteProvider:
 
     def sequence(self, chrom):
         """Return the requested chromosome sequence."""
-        if self.fasta_backend == "pyfastx":
-            if self._pyfastx_fasta is None:
-                import pyfastx
-
-                self._pyfastx_fasta = pyfastx.Fasta(str(self.fasta_fname))
-            if chrom not in self._pyfastx_fasta:
-                raise KeyError(f"Chromosome {chrom!r} not found in {self.fasta_fname}")
-            return str(self._pyfastx_fasta[chrom])
-        return _python_fasta_sequence(self.fasta_fname, chrom)
+        if self._pyfaidx_fasta is None:
+            self._pyfaidx_fasta = open_fasta(self.fasta_fname)
+        if chrom not in self._pyfaidx_fasta:
+            raise KeyError(f"Chromosome {chrom!r} not found in {self.fasta_fname}")
+        return self._pyfaidx_fasta[chrom][:]
 
     def for_chrom(self, chrom):
         """Return ordered motif BED tables for a single chromosome."""

@@ -17,11 +17,14 @@ class FakeBigWig:
     def __init__(self, values):
         self._values = np.asarray(values, dtype=np.float64)
 
-    def chroms(self, chrom):
-        return self._values.shape[0]
+        self.chrom_sizes = {"chr1": self._values.shape[0]}
 
-    def values(self, chrom, start, end, fillna=0.0):
-        return self._values[start:end]
+    def read(self, chroms, starts, width, missing=0.0, oob=np.nan):
+        out = np.full((len(starts), width), oob, dtype=np.float32)
+        for row, start in enumerate(starts):
+            stop = min(start + width, self._values.shape[0])
+            out[row, : stop - start] = self._values[start:stop]
+        return out
 
 
 def test_metaplot_profile_averages_windows_centered_on_motif_start():
@@ -153,8 +156,6 @@ def test_metaplot_fasta_mode_skips_chromosomes_missing_from_bigwigs(
         str(chrom_sizes_file),
         "--motif",
         "TGG:0",
-        "--fasta-backend",
-        "python",
         "--motif-match-backend",
         "python",
         "-o",

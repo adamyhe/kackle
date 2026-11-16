@@ -59,9 +59,10 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
 - `motifs.py` — motif spec parsing (`KMER[:MISMATCHES]`), Hamming-neighborhood expansion
   (`mismatch_variants`), sequence matching (`ahocorasick-rs` by default, plain-Python fallback),
   and `FastaMotifSiteProvider`, which locates motif BED6 rows one chromosome at a time via indexed
-  `pyfastx` access instead of materializing whole-genome motif tables.
+  `pyfaidx` access instead of materializing whole-genome motif tables. All FASTA reading goes
+  through `open_fasta()` (pyfaidx, `.fai` index); there is no hand-rolled FASTA parser.
 - `bigwig.py` — the only boundary between in-memory dense arrays/sparse DataFrames and on-disk
-  bigWig files, via `pybigtools`.
+  bigWig files, via `figwig` (`BigWigReader` / `write_bigwig`).
 - `cli_common.py` — shared argparse formatting, BED6/chrom-sizes readers, and
   `intersect_ordered()` for reconciling chromosome sets across inputs.
 - `correction.py` — the `kmer_resample()` pipeline and the `kackle` CLI entry point
@@ -80,8 +81,8 @@ Plus- and minus-strand bigWigs are corrected **independently** (two full passes 
    the BED `start` column; minus-strand anchors use `end`.
 2. Chromosomes are corrected via `_correct_chromosome()`, run either serially or fanned out across
    `chrom_workers` (thread or process pool, chosen by `--worker-backend`). Each worker:
-   - Opens its own `pybigtools` handle and pulls dense per-base values for the whole chromosome
-     (`bw.values(...)`), converting minus-strand values to absolute counts.
+   - Opens a `figwig.BigWigReader` and reads the whole chromosome as one dense window
+     (`read_chrom_values()` in `bigwig.py`), converting minus-strand values to absolute counts.
    - Applies motif passes **sequentially** — each entry in `motif_specs`/`motif_beds` is one full
      `correct_kmers()` call over the array, so e.g. the default `TGG:0` pass runs and its output
      feeds the subsequent `TGGAA:1` pass. This ordering is deliberate (short exact matches corrected
