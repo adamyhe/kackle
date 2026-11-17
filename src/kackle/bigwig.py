@@ -34,6 +34,25 @@ def read_chrom_values(bw_fname, chrom, n_jobs=1):
     return bw.read([chrom], [0], chrom_size, n_jobs=n_jobs, missing=0.0)[0]
 
 
+def open_bigwig_writer(bw_fname, chrom_sizes, n_jobs=8):
+    """Open a streaming bigWig writer; use it as a context manager.
+
+    Chromosomes must then be written with :func:`write_chrom_intervals` in
+    ``chrom_sizes`` order.
+    """
+    chrom_sizes = [(chrom, int(size)) for chrom, size in dict(chrom_sizes).items()]
+    return figwig.BigWigWriter(str(bw_fname), chrom_sizes, n_jobs=n_jobs)
+
+
+def write_chrom_intervals(writer, chrom, starts, values, ends=None):
+    """Write one chromosome's intervals (per-base when ``ends`` is omitted)."""
+    starts = np.asarray(starts, dtype=np.int64)
+    if starts.shape[0] == 0:
+        return
+    ends = starts + 1 if ends is None else np.asarray(ends, dtype=np.int64)
+    writer.write(chrom, starts, np.asarray(values, dtype=np.float64), ends=ends)
+
+
 def write_bigwig(bed_df, bw_fname, chrom_sizes, n_jobs=8):
     """Write nonzero per-base signal intervals to a bigWig.
 
@@ -53,18 +72,14 @@ def write_bigwig(bed_df, bw_fname, chrom_sizes, n_jobs=8):
     n_jobs : int
         Maximum compression threads used by figwig.
     """
-    chrom_sizes = [(chrom, int(size)) for chrom, size in dict(chrom_sizes).items()]
     groups = {
         chrom: rows for chrom, rows in bed_df.groupby("chrom", sort=False, observed=True)
     }
-    with figwig.BigWigWriter(str(bw_fname), chrom_sizes, n_jobs=n_jobs) as writer:
-        for chrom, _ in chrom_sizes:
+    with open_bigwig_writer(bw_fname, chrom_sizes, n_jobs=n_jobs) as writer:
+        for chrom in dict(chrom_sizes):
             rows = groups.get(chrom)
             if rows is None or rows.empty:
                 continue
-            writer.write(
-                chrom,
-                rows["start"].to_numpy(dtype=np.int64),
-                rows["value"].to_numpy(dtype=np.float64),
-                ends=rows["end"].to_numpy(dtype=np.int64),
+            write_chrom_intervals(
+                writer, chrom, rows["start"], rows["value"], ends=rows["end"]
             )

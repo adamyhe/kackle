@@ -1,7 +1,7 @@
 """Correction workflow and command-line entry point for kackle."""
 
 import argparse
-import gc
+import contextlib
 import os
 import re
 import textwrap
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import tqdm
 
-from kackle.bigwig import read_chrom_values, write_bigwig
+from kackle.bigwig import open_bigwig_writer, read_chrom_values, write_chrom_intervals
 from kackle.cli_common import (
     DEFAULT_MOTIFS,
     KackleArgumentFormatter,
@@ -92,31 +92,51 @@ def _isolated_provider(motif_site_provider, isolate_fasta):
     return motif_site_provider
 
 
-def _provider_anchor_arrays(motif_site_provider, chrom, strand, keep_sites, isolate_fasta):
-    """Ordered per-pass anchor arrays for one chromosome from a motif provider.
+def _anchors_from_starts(motif_specs, spec_starts, strand):
+    """Ordered int32 anchor arrays for one strand from ``starts_for_chrom`` output.
 
-    Providers with ``starts_for_chrom`` (``FastaMotifSiteProvider``) return
-    start arrays directly, and only the strand being corrected is located
-    unless ``keep_sites`` asks for both (for ``--out-bed6-prefix``). Minus
-    anchors are ``start + len(motif)``, the BED ``end`` column. Other
-    providers go through their ``for_chrom`` BED tables.
-
-    Returns ``(anchor_arrays, sites)``, where ``sites`` is the
-    ``starts_for_chrom`` output when ``keep_sites`` is true, else ``None``.
+    Minus anchors are ``start + len(motif)``, the BED ``end`` column.
     """
-    provider = _isolated_provider(motif_site_provider, isolate_fasta)
-    if not hasattr(provider, "starts_for_chrom"):
-        beds = provider.for_chrom(chrom)
-        return motif_anchor_arrays(beds, strand), None
-    strands = ("+", "-") if keep_sites else (strand,)
-    spec_starts = provider.starts_for_chrom(chrom, strands=strands)
     anchors = []
-    for spec, starts in zip(provider.motif_specs, spec_starts):
+    for spec, starts in zip(motif_specs, spec_starts):
         strand_starts = starts[strand]
         if strand == "-":
             strand_starts = strand_starts + len(spec.motif)
         anchors.append(strand_starts.astype(np.int32))
-    return anchors, (spec_starts if keep_sites else None)
+    return anchors
+
+
+def _provider_anchor_arrays(
+    motif_site_provider, chrom, strand, keep_sites, isolate_fasta, strands=None
+):
+    """Ordered per-pass anchor arrays for one chromosome from a motif provider.
+
+    ``strand`` is one strand (``"+"``/``"-"``) or a tuple of strands; with a
+    tuple, a ``{strand: anchor_arrays}`` dict is returned instead of a list.
+    Providers with ``starts_for_chrom`` (``FastaMotifSiteProvider``) return
+    start arrays directly, and only the strands asked for are located unless
+    ``keep_sites`` asks for both (for ``--out-bed6-prefix``). Other providers
+    go through their ``for_chrom`` BED tables.
+
+    Returns ``(anchors, sites)``, where ``sites`` is the ``starts_for_chrom``
+    output when ``keep_sites`` is true, else ``None``.
+    """
+    wanted = (strand,) if isinstance(strand, str) else tuple(strand)
+    provider = _isolated_provider(motif_site_provider, isolate_fasta)
+    if not hasattr(provider, "starts_for_chrom"):
+        beds = provider.for_chrom(chrom)
+        by_strand = {s: motif_anchor_arrays(beds, s) for s in wanted}
+        sites = None
+    else:
+        located = ("+", "-") if keep_sites else wanted
+        spec_starts = provider.starts_for_chrom(chrom, strands=located)
+        by_strand = {
+            s: _anchors_from_starts(provider.motif_specs, spec_starts, s) for s in wanted
+        }
+        sites = spec_starts if keep_sites else None
+    if isinstance(strand, str):
+        return by_strand[strand], sites
+    return by_strand, sites
 
 
 def motif_anchor_arrays(motif_beds, strand, chrom=None):
@@ -131,6 +151,27 @@ def motif_anchor_arrays(motif_beds, strand, chrom=None):
             keep &= bed.chrom == chrom
         arrays.append(bed.loc[keep, anchor_col].to_numpy(dtype=np.int32, copy=True))
     return arrays
+
+
+def bed_anchor_index(motif_beds, chroms, strands=("+", "-")):
+    """``{chrom: {strand: [anchors per BED]}}`` from BED6 tables, grouped once.
+
+    Equivalent to calling :func:`motif_anchor_arrays` for every chromosome
+    and strand, without re-filtering each table per chromosome.
+    """
+    empty = np.empty(0, dtype=np.int32)
+    index = {chrom: {strand: [] for strand in strands} for chrom in chroms}
+    for bed in motif_beds:
+        for strand in strands:
+            anchor_col = "start" if strand == "+" else "end"
+            rows = bed.loc[bed.strand == strand, ["chrom", anchor_col]]
+            groups = {
+                chrom: group[anchor_col].to_numpy(dtype=np.int32, copy=True)
+                for chrom, group in rows.groupby("chrom", sort=False, observed=True)
+            }
+            for chrom in chroms:
+                index[chrom][strand].append(groups.get(chrom, empty))
+    return index
 
 
 def _needs_bed6_sites(motif_site_provider, chrom):
@@ -149,6 +190,45 @@ def _append_motif_sites_for_chrom(motif_site_provider, chrom, sites):
     motif_site_provider.write_bed6(chrom, sites)
 
 
+def _set_numba_threads(numba_threads):
+    if numba_threads is not None:
+        from numba import set_num_threads
+
+        set_num_threads(numba_threads)
+
+
+def _correct_strand_signal(
+    bw_fname, chrom, strand, anchor_arrays, source, target, threshold, n_jobs
+):
+    """Read, correct and sparsify one strand of one chromosome.
+
+    Returns ``(positions, values)``: the int32 positions of the corrected
+    signal's nonzero bases and their (integer) values. The dense arrays are
+    freed before returning.
+    """
+    values = read_chrom_values(bw_fname, chrom, n_jobs=n_jobs).astype(np.int32)
+    if strand == "-":
+        np.abs(values, out=values)
+    for starts in anchor_arrays:
+        if starts.shape[0] == 0:
+            continue
+        values = correct_kmers(values, starts, source, target, threshold, strand)
+    positions = np.flatnonzero(values > 0).astype(np.int32)
+    return positions, values[positions]
+
+
+def _sparse_frame(chrom, positions, values):
+    """The ``chrom``/``start``/``end``/``value`` rows ``kmer_resample`` returns."""
+    return pd.DataFrame(
+        {
+            "chrom": np.full(positions.shape[0], chrom, dtype=object),
+            "start": positions,
+            "end": positions + 1,
+            "value": values.astype(np.float64),
+        }
+    )
+
+
 def _correct_chromosome(
     bw_fname,
     chrom,
@@ -163,23 +243,13 @@ def _correct_chromosome(
     numba_threads=None,
     keep_sites=False,
 ):
-    """Correct one chromosome; return ``(chrom, sparse output, sites or None)``.
+    """Correct one strand of one chromosome.
 
-    ``sites`` is the provider's ``starts_for_chrom`` output when
-    ``keep_sites`` is set (so the parent can write ``--out-bed6-prefix``).
+    Returns ``(chrom, positions, values, sites or None)``; ``sites`` is the
+    provider's ``starts_for_chrom`` output when ``keep_sites`` is set (so the
+    parent can write ``--out-bed6-prefix``).
     """
-    if numba_threads is not None:
-        from numba import set_num_threads
-
-        set_num_threads(numba_threads)
-
-    values = read_chrom_values(
-        bw_fname, chrom, n_jobs=numba_threads if numba_threads is not None else 1
-    ).astype(np.int32)
-
-    if strand == "-":
-        values = np.abs(values)
-    corrected_signal = values
+    _set_numba_threads(numba_threads)
     chrom_sites = None
     if motif_site_provider is not None:
         motif_start_arrays, chrom_sites = _provider_anchor_arrays(
@@ -189,31 +259,110 @@ def _correct_chromosome(
             keep_sites=keep_sites,
             isolate_fasta=isolate_fasta_provider,
         )
-    else:
-        motif_start_arrays = motif_start_arrays or []
+    positions, values = _correct_strand_signal(
+        bw_fname,
+        chrom,
+        strand,
+        motif_start_arrays or [],
+        source,
+        target,
+        threshold,
+        numba_threads if numba_threads is not None else 1,
+    )
+    return chrom, positions, values, chrom_sites
 
-    for starts in motif_start_arrays:
-        if starts.shape[0] == 0:
-            continue
-        corrected_signal = correct_kmers(
-            corrected_signal,
-            starts,
+
+def _correct_chromosome_both_strands(
+    bw_fnames,
+    chrom,
+    strand_anchors,
+    motif_site_provider,
+    source,
+    target,
+    threshold,
+    isolate_fasta_provider=False,
+    numba_threads=None,
+    keep_sites=False,
+):
+    """Correct both strands of one chromosome, one strand at a time.
+
+    ``bw_fnames`` maps ``"+"``/``"-"`` to input bigWigs. Anchors come from
+    ``strand_anchors`` (``{strand: anchor_arrays}``) or, when it is ``None``,
+    from ``motif_site_provider``, which locates both strands in one call.
+    Returns ``(chrom, {strand: (positions, values)}, sites or None)``.
+    """
+    _set_numba_threads(numba_threads)
+    strands = tuple(bw_fnames)
+    chrom_sites = None
+    if strand_anchors is None:
+        strand_anchors, chrom_sites = _provider_anchor_arrays(
+            motif_site_provider,
+            chrom,
+            strands,
+            keep_sites=keep_sites,
+            isolate_fasta=isolate_fasta_provider,
+        )
+    n_jobs = numba_threads if numba_threads is not None else 1
+    corrected = {}
+    for strand in strands:
+        corrected[strand] = _correct_strand_signal(
+            bw_fnames[strand],
+            chrom,
+            strand,
+            strand_anchors[strand],
             source,
             target,
             threshold,
-            strand,
+            n_jobs,
         )
+        strand_anchors[strand] = None
+    return chrom, corrected, chrom_sites
 
-    nonzero_starts = np.flatnonzero(corrected_signal > 0).astype(np.int32)
-    corrected_df = pd.DataFrame(
-        {
-            "chrom": np.full(nonzero_starts.shape[0], chrom, dtype=object),
-            "start": nonzero_starts,
-            "end": nonzero_starts + 1,
-            "value": corrected_signal[nonzero_starts].astype(np.float64),
-        }
+
+def _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider):
+    if motif_beds is None and motif_site_provider is None:
+        if bed6_fname is None:
+            raise ValueError(
+                "Either bed6_fname, motif_beds, or motif_site_provider must be provided"
+            )
+        motif_beds = [read_bed6(bed6_fname)]
+    return motif_beds
+
+
+def _run_chromosomes(
+    task, task_args, chroms, chrom_workers, worker_backend, verbose, desc, on_result
+):
+    """Run ``task(chrom, *args)`` per chromosome; hand results over in ``chroms`` order.
+
+    ``on_result(result)`` is called for each chromosome's result as soon as it
+    and every chromosome before it have finished, so output can be streamed
+    in order while later chromosomes are still running.
+    """
+    if chrom_workers == 1:
+        for chrom in tqdm.tqdm(chroms, disable=not verbose, desc=desc):
+            on_result(task(chrom, *task_args[chrom]))
+        return
+
+    executor_class = (
+        ProcessPoolExecutor if worker_backend == "process" else ThreadPoolExecutor
     )
-    return chrom, corrected_df, chrom_sites
+    pending = {}
+    next_idx = 0
+    with executor_class(max_workers=chrom_workers) as executor:
+        futures = {
+            executor.submit(task, chrom, *task_args[chrom]): chrom for chrom in chroms
+        }
+        for future in tqdm.tqdm(
+            as_completed(futures),
+            total=len(futures),
+            disable=not verbose,
+            desc=f"{desc} ({chrom_workers} chrom workers)",
+        ):
+            pending[futures[future]] = future.result()
+            del futures[future]
+            while next_idx < len(chroms) and chroms[next_idx] in pending:
+                on_result(pending.pop(chroms[next_idx]))
+                next_idx += 1
 
 
 def kmer_resample(
@@ -232,6 +381,9 @@ def kmer_resample(
     verbose=True,
 ):
     """Correct one strand-specific bigWig and return nonzero output intervals.
+
+    The ``kackle`` CLI uses :func:`correct_bigwigs` instead, which corrects
+    both strands in one pass and streams them to bigWig files.
 
     Parameters
     ----------
@@ -275,93 +427,152 @@ def kmer_resample(
         raise ValueError("Strand must be '+' or '-'")
     if worker_backend not in {"thread", "process"}:
         raise ValueError("worker_backend must be 'thread' or 'process'")
-    if motif_beds is None and motif_site_provider is None:
-        if bed6_fname is None:
-            raise ValueError(
-                "Either bed6_fname, motif_beds, or motif_site_provider must be provided"
-            )
-        motif_beds = [read_bed6(bed6_fname)]
+    motif_beds = _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider)
 
     if chroms is None:
         chroms = ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
     chrom_workers = resolve_chrom_workers(chrom_workers, len(chroms))
+    parallel = chrom_workers > 1
+    if motif_site_provider is None:
+        index = bed_anchor_index(motif_beds, chroms, strands=(strand,))
+    task_args = {
+        chrom: (
+            None,
+            index[chrom][strand] if motif_site_provider is None else None,
+            motif_site_provider,
+            strand,
+            source,
+            target,
+            threshold,
+            parallel,
+            numba_threads,
+            _needs_bed6_sites(motif_site_provider, chrom),
+        )
+        for chrom in chroms
+    }
+    frames = []
 
-    if chrom_workers == 1:
-        dfs = []
-        for chrom in tqdm.tqdm(
-            chroms,
-            disable=not verbose,
-            desc=f"Correcting {'plus' if strand == '+' else 'minus'} strand kmers",
-        ):
-            chrom_start_arrays = None
-            if motif_site_provider is None:
-                chrom_start_arrays = motif_anchor_arrays(motif_beds, strand, chrom)
-            _, corrected_df, chrom_sites = _correct_chromosome(
-                bw_fname,
-                chrom,
-                None,
-                chrom_start_arrays,
-                motif_site_provider,
-                strand,
-                source,
-                target,
-                threshold,
-                False,
-                numba_threads,
-                keep_sites=_needs_bed6_sites(motif_site_provider, chrom),
-            )
-            _append_motif_sites_for_chrom(motif_site_provider, chrom, chrom_sites)
-            dfs.append(corrected_df)
-        return pd.concat(dfs, ignore_index=True)
-
-    results = {}
-    executor_class = (
-        ProcessPoolExecutor if worker_backend == "process" else ThreadPoolExecutor
-    )
-    task_args = []
-    for chrom in chroms:
-        chrom_start_arrays = None
-        if motif_site_provider is None:
-            chrom_start_arrays = motif_anchor_arrays(motif_beds, strand, chrom)
-        task_args.append((chrom, chrom_start_arrays))
-
-    with executor_class(max_workers=chrom_workers) as executor:
-        futures = {
-            executor.submit(
-                _correct_chromosome,
-                bw_fname,
-                chrom,
-                None,
-                chrom_start_arrays,
-                motif_site_provider,
-                strand,
-                source,
-                target,
-                threshold,
-                True,
-                numba_threads,
-                _needs_bed6_sites(motif_site_provider, chrom),
-            ): chrom
-            for chrom, chrom_start_arrays in task_args
-        }
-        for future in tqdm.tqdm(
-            as_completed(futures),
-            total=len(futures),
-            disable=not verbose,
-            desc=(
-                f"Correcting {'plus' if strand == '+' else 'minus'} strand "
-                f"kmers ({chrom_workers} chrom workers)"
-            ),
-        ):
-            chrom, corrected_df, chrom_sites = future.result()
-            results[chrom] = (corrected_df, chrom_sites)
-
-    dfs = []
-    for chrom in chroms:
-        corrected_df, chrom_sites = results[chrom]
+    def collect(result):
+        chrom, positions, values, chrom_sites = result
         _append_motif_sites_for_chrom(motif_site_provider, chrom, chrom_sites)
-        dfs.append(corrected_df)
-    return pd.concat(dfs, ignore_index=True)
+        frames.append(_sparse_frame(chrom, positions, values))
+
+    _run_chromosomes(
+        _correct_chromosome_task,
+        {chrom: (bw_fname, *args) for chrom, args in task_args.items()},
+        chroms,
+        chrom_workers,
+        worker_backend,
+        verbose,
+        f"Correcting {'plus' if strand == '+' else 'minus'} strand kmers",
+        collect,
+    )
+    return pd.concat(frames, ignore_index=True)
+
+
+def _correct_chromosome_task(chrom, bw_fname, *args):
+    """``_correct_chromosome`` with ``chrom`` first, for :func:`_run_chromosomes`."""
+    return _correct_chromosome(bw_fname, chrom, *args)
+
+
+def correct_bigwigs(
+    in_bw_fnames,
+    out_bw_fnames,
+    chrom_sizes,
+    bed6_fname=None,
+    motif_beds=None,
+    motif_site_provider=None,
+    source=10,
+    target=5,
+    threshold=10,
+    chrom_workers=1,
+    worker_backend="thread",
+    numba_threads=None,
+    write_jobs=None,
+    verbose=True,
+):
+    """Correct both strands in one pass per chromosome and stream them to bigWigs.
+
+    Each chromosome is handled by one task that locates (or looks up) its
+    motif sites for both strands, then reads, corrects and sparsifies each
+    strand in turn. Finished chromosomes are written to both output bigWigs
+    in ``chrom_sizes`` order as soon as every earlier chromosome is done, so
+    only the sparse results of chromosomes waiting their turn are held.
+
+    Parameters
+    ----------
+    in_bw_fnames, out_bw_fnames : dict
+        ``{"+": path, "-": path}`` input and output bigWigs. Minus-strand
+        input values are converted to absolute counts.
+    chrom_sizes : sequence of (str, int)
+        Chromosomes to correct, in output order, and their lengths.
+    bed6_fname, motif_beds, motif_site_provider
+        Motif sites, as in :func:`kmer_resample`.
+    source, target, threshold : int
+        Parameters forwarded to ``correct_kmers``.
+    chrom_workers, worker_backend, numba_threads, verbose
+        As in :func:`kmer_resample`.
+    write_jobs : int, optional
+        Compression threads per output bigWig. Defaults to the thread budget.
+    """
+    if worker_backend not in {"thread", "process"}:
+        raise ValueError("worker_backend must be 'thread' or 'process'")
+    strands = ("+", "-")
+    in_bw_fnames = {strand: in_bw_fnames[strand] for strand in strands}
+    motif_beds = _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider)
+    chrom_sizes = [(chrom, int(size)) for chrom, size in chrom_sizes]
+    chroms = [chrom for chrom, _ in chrom_sizes]
+    chrom_workers = resolve_chrom_workers(chrom_workers, len(chroms))
+    parallel = chrom_workers > 1
+    if write_jobs is None:
+        write_jobs = thread_budget()
+    index = (
+        bed_anchor_index(motif_beds, chroms) if motif_site_provider is None else None
+    )
+    task_args = {
+        chrom: (
+            in_bw_fnames,
+            None if index is None else index.pop(chrom),
+            motif_site_provider,
+            source,
+            target,
+            threshold,
+            parallel,
+            numba_threads,
+            _needs_bed6_sites(motif_site_provider, chrom),
+        )
+        for chrom in chroms
+    }
+
+    with contextlib.ExitStack() as stack:
+        writers = {
+            strand: stack.enter_context(
+                open_bigwig_writer(out_bw_fnames[strand], chrom_sizes, n_jobs=write_jobs)
+            )
+            for strand in strands
+        }
+
+        def write(result):
+            chrom, corrected, chrom_sites = result
+            _append_motif_sites_for_chrom(motif_site_provider, chrom, chrom_sites)
+            for strand in strands:
+                write_chrom_intervals(writers[strand], chrom, *corrected[strand])
+
+        _run_chromosomes(
+            _both_strands_task,
+            task_args,
+            chroms,
+            chrom_workers,
+            worker_backend,
+            verbose,
+            "Correcting kmers on both strands",
+            write,
+        )
+
+
+def _both_strands_task(chrom, bw_fnames, *args):
+    """``_correct_chromosome_both_strands`` with ``chrom`` first."""
+    return _correct_chromosome_both_strands(bw_fnames, chrom, *args)
 
 
 def parse_args():
@@ -615,38 +826,18 @@ def run_correction():
             bed6_fnames=bed6_fnames,
         )
 
-    pl_bg = kmer_resample(
-        bw_fname=args.in_pl_bw,
+    correct_bigwigs(
+        {"+": args.in_pl_bw, "-": args.in_mn_bw},
+        {"+": args.out_pl_bw, "-": args.out_mn_bw},
+        chrom_sizes,
         bed6_fname=args.bed6,
         motif_site_provider=motif_site_provider,
-        strand="+",
-        chroms=chroms,
         source=args.source,
         target=args.target,
         threshold=args.threshold,
         chrom_workers=chrom_workers,
         worker_backend=args.worker_backend,
         numba_threads=numba_threads,
+        write_jobs=thread_budget(),
         verbose=args.verbose,
     )
-    print("Writing plus strand bigWig ...")
-    write_bigwig(pl_bg, args.out_pl_bw, chrom_sizes, n_jobs=thread_budget())
-    del pl_bg
-    gc.collect()
-
-    mn_bg = kmer_resample(
-        bw_fname=args.in_mn_bw,
-        bed6_fname=args.bed6,
-        motif_site_provider=motif_site_provider,
-        strand="-",
-        chroms=chroms,
-        source=args.source,
-        target=args.target,
-        threshold=args.threshold,
-        chrom_workers=chrom_workers,
-        worker_backend=args.worker_backend,
-        numba_threads=numba_threads,
-        verbose=args.verbose,
-    )
-    print("Writing minus strand bigWig ...")
-    write_bigwig(mn_bg, args.out_mn_bw, chrom_sizes, n_jobs=thread_budget())
