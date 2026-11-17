@@ -251,6 +251,98 @@ def correct_artifact_bases(
     return out_vec
 
 
+@njit(parallel=True, cache=True)
+def correct_adapter_sites(
+    chromosome_signal_vector: np.array,
+    starts: np.array,
+    thresholds: np.array,
+    source: np.uint = 10,
+    strand: str = "+",
+) -> np.array:
+    """Screen and correct all adapter look-alike sites of one strand in one pass.
+
+    Each anchor's artifact base (plus: ``anchor - 1``; minus: ``anchor``) is
+    compared with the mean of its ``[anchor - source, anchor + source)``
+    neighborhood, leaving out the artifact bases of *every* candidate (flagged
+    or not). The screen is therefore deterministic and independent of site
+    order: no spike at a nearby candidate inflates the background. A site is
+    flagged when its artifact base exceeds ``thresholds[i]`` times that mean,
+    and its artifact base is replaced with a Poisson draw with that mean.
+    Every other base keeps its input value. Each site writes only its own
+    artifact base and reads only the input, so the loop has no races.
+    ``starts`` must not repeat an anchor.
+    """
+    out_vec = chromosome_signal_vector.copy()
+    n = starts.shape[0]
+    if n == 0:
+        return out_vec
+    length = chromosome_signal_vector.shape[0]
+    offset = 1 if strand == "+" else 0
+    art = np.sort(starts.astype(np.int64)) - offset
+    m = art.shape[0]
+    for i in prange(n):
+        anchor = np.int64(starts[i])
+        idx = anchor - offset
+        lo = anchor - source
+        hi = anchor + source
+        if lo < 0 or hi > length:
+            continue
+        total = 0.0
+        count = 0
+        k = np.searchsorted(art, lo)
+        for j in range(lo, hi):
+            while k < m and art[k] < j:
+                k += 1
+            if k < m and art[k] == j:
+                continue
+            total += chromosome_signal_vector[j]
+            count += 1
+        if count == 0:
+            continue
+        mean = total / count
+        if chromosome_signal_vector[idx] > thresholds[i] * mean:
+            out_vec[idx] = np.random.poisson(mean)
+    return out_vec
+
+
+@njit(parallel=True, cache=True)
+def adapter_match_lengths(sequence, adapter, min_match):
+    """Adapter look-alike match length at every window start, 0 if not a candidate.
+
+    ``sequence`` and ``adapter`` are IUPAC bitmasks (A=1, C=2, G=4, T=8; 0 for
+    anything that is not A/C/G/T in the sequence), so a base matches when the
+    masks share a bit. ``min_match[m]`` is the shortest prefix of the adapter
+    that makes a candidate when it contains ``m`` mismatches; its length minus
+    one is the most mismatches allowed. Returns, for each window start ``p``
+    in ``[0, len(sequence) - len(adapter)]``, the length of the longest
+    adapter prefix matched with at most that many mismatches (ending on a
+    match) when the window is a candidate, else 0.
+    """
+    n = sequence.shape[0]
+    k_len = adapter.shape[0]
+    max_mm = min_match.shape[0] - 1
+    n_windows = n - k_len + 1
+    if n_windows < 0:
+        n_windows = 0
+    out = np.zeros(n_windows, dtype=np.int8)
+    for p in prange(n_windows):
+        mm = 0
+        last = 0
+        candidate = False
+        for k in range(k_len):
+            if sequence[p + k] & adapter[k]:
+                last = k + 1
+                if last >= min_match[mm]:
+                    candidate = True
+            else:
+                mm += 1
+                if mm > max_mm:
+                    break
+        if candidate:
+            out[p] = last
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Motif matching
 # ---------------------------------------------------------------------------

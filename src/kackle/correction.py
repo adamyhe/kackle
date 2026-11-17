@@ -26,7 +26,12 @@ from kackle.cli_common import (
     read_bed6,
     read_chrom_sizes,
 )
-from kackle.computation import correct_artifact_bases, correct_kmers
+from kackle.computation import (
+    correct_adapter_sites,
+    correct_artifact_bases,
+    correct_kmers,
+)
+from kackle.adapter import AdapterSiteProvider, parse_min_match, parse_tiers
 from kackle.motifs import FastaMotifSiteProvider
 from kackle.motifs import fasta_chrom_names
 from kackle.motifs import parse_motif_spec
@@ -226,6 +231,7 @@ def _correct_strand_signal(
     start=0,
     end=None,
     resample="window",
+    pass_thresholds=None,
 ):
     """Read, correct and sparsify one strand of a chromosome or of ``[start, end)``.
 
@@ -240,6 +246,15 @@ def _correct_strand_signal(
     )
     if strand == "-":
         np.abs(values, out=values)
+    if pass_thresholds is not None:
+        # One combined pass (adapter mode): every array is a threshold tier.
+        starts = np.concatenate([np.asarray(a, dtype=np.int32) for a in anchor_arrays])
+        thresholds = np.concatenate(
+            [np.full(len(a), t, dtype=np.float64) for a, t in zip(anchor_arrays, pass_thresholds)]
+        )
+        if starts.shape[0]:
+            values = correct_adapter_sites(values, starts, thresholds, source, strand)
+        anchor_arrays = []
     for starts in anchor_arrays:
         if starts.shape[0] == 0:
             continue
@@ -351,6 +366,7 @@ def _correct_region_both_strands(
     numba_threads=None,
     keep_sites=False,
     resample="window",
+    pass_thresholds=None,
 ):
     """Correct both strands of one chromosome region, one strand at a time.
 
@@ -400,6 +416,7 @@ def _correct_region_both_strands(
             start=start,
             end=end,
             resample=resample,
+            pass_thresholds=pass_thresholds,
         )
         if start:
             positions += start
@@ -627,6 +644,8 @@ def kmer_resample(
         raise ValueError("Strand must be '+' or '-'")
     if worker_backend not in {"thread", "process"}:
         raise ValueError("worker_backend must be 'thread' or 'process'")
+    if getattr(motif_site_provider, "pass_thresholds", None) is not None:
+        raise ValueError("adapter site providers are only supported by correct_bigwigs")
     motif_beds = _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider)
 
     if chroms is None:
@@ -763,6 +782,7 @@ def correct_bigwigs(
         else dict.fromkeys(chroms)
     )
     reach = max(source, target)
+    pass_thresholds = getattr(motif_site_provider, "pass_thresholds", None)
 
     regions = []
     task_args = {}
@@ -798,6 +818,7 @@ def correct_bigwigs(
                 numba_threads,
                 keep_sites,
                 resample,
+                pass_thresholds,
             )
         last_region[chrom] = regions[-1]
         del chrom_anchors
@@ -946,6 +967,38 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--adapter",
+        metavar="SEQ",
+        default=None,
+        help=(
+            "Experimental, FASTA mode: derive candidate sites from this 3' "
+            "adapter sequence (IUPAC; e.g. TGGAATTCTCGG) instead of -k motifs, "
+            "and correct them in one pass with base-only resampling. A site is "
+            "a position whose sequence matches the adapter's 5' end for at "
+            "least --adapter-min-match bases."
+        ),
+    )
+    parser.add_argument(
+        "--adapter-min-match",
+        metavar="L0[,L1,...]",
+        default="3,5",
+        help=(
+            "Shortest adapter prefix that makes a candidate, with 0, 1, ... "
+            "mismatches in it; the list length minus one is the most "
+            "mismatches allowed."
+        ),
+    )
+    parser.add_argument(
+        "--adapter-tiers",
+        metavar="LEN:FOLD[,...]",
+        default="8:5,10:3",
+        help=(
+            "Lower fold thresholds for longer matches: sites matching at "
+            "least LEN adapter bases (mismatches included) are flagged at "
+            "FOLD instead of --threshold. Empty for none."
+        ),
+    )
+    parser.add_argument(
         "-P",
         "--only-positive-strand",
         action="store_true",
@@ -1006,11 +1059,12 @@ def parse_args():
     parser.add_argument(
         "--resample",
         choices=("window", "base"),
-        default="window",
+        default=None,
         help=(
-            "What to redraw at a flagged site: 'window' (default) resamples the "
-            "whole target window from the flanks; 'base' (experimental) redraws "
-            "only the artifact base from its local mean."
+            "What to redraw at a flagged site: 'window' (the default, except "
+            "with --adapter) resamples the whole target window from the "
+            "flanks; 'base' (experimental) redraws only the artifact base "
+            "from its local mean."
         ),
     )
     parser.add_argument(
@@ -1062,6 +1116,16 @@ def parse_args():
         help="Show per-chromosome progress bars while correcting.",
     )
     args = parser.parse_args()
+    if args.adapter is not None:
+        if not args.fasta:
+            parser.error("--adapter needs -f/--fasta")
+        if args.motif or args.out_bed6_prefix:
+            parser.error("--adapter can't be combined with -k or --out-bed6-prefix")
+        if args.resample == "window":
+            parser.error("--adapter uses base-only resampling")
+        args.resample = "base"
+    elif args.resample is None:
+        args.resample = "window"
     if args.bed6 and args.motif:
         parser.error("--motif can only be used with --fasta")
     if args.bed6 and args.only_positive_strand:
@@ -1104,7 +1168,16 @@ def run_correction():
             f"with the {args.worker_backend} backend."
         )
     motif_site_provider = None
-    if args.fasta:
+    if args.adapter is not None:
+        motif_site_provider = AdapterSiteProvider(
+            args.fasta,
+            args.adapter,
+            min_match=parse_min_match(args.adapter_min_match),
+            tiers=parse_tiers(args.adapter_tiers),
+            threshold=args.threshold,
+            both_strands=not args.only_positive_strand,
+        )
+    elif args.fasta:
         motif_specs = args.motif or DEFAULT_MOTIFS
         bed6_fnames = (
             motif_bed6_fnames(args.out_bed6_prefix, motif_specs)
