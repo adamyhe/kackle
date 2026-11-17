@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import multiprocessing
 import os
 import re
 import textwrap
@@ -343,12 +344,18 @@ def _run_chromosomes(
             on_result(task(chrom, *task_args[chrom]))
         return
 
-    executor_class = (
-        ProcessPoolExecutor if worker_backend == "process" else ThreadPoolExecutor
-    )
+    if worker_backend == "process":
+        # spawn, not fork: the parent runs figwig writer threads (and may have
+        # run numba threads), and forking a multi-threaded process can crash
+        # or deadlock the child.
+        executor = ProcessPoolExecutor(
+            max_workers=chrom_workers, mp_context=multiprocessing.get_context("spawn")
+        )
+    else:
+        executor = ThreadPoolExecutor(max_workers=chrom_workers)
     pending = {}
     next_idx = 0
-    with executor_class(max_workers=chrom_workers) as executor:
+    with executor:
         futures = {
             executor.submit(task, chrom, *task_args[chrom]): chrom for chrom in chroms
         }
