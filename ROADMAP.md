@@ -48,6 +48,8 @@ itself was negligible.
    (6.1 s) dwarf the Aho-Corasick scan (3.6 s). Return NumPy anchor arrays and
    build BED tables only for `--out-bed6-prefix`. A numba Hamming-match kernel
    over the sequence bytes could replace the variant expansion entirely.
+   `kackle-metaplot` needs only start arrays too, so this is also the main
+   remaining metaplot cost (see item 6).
 3. **Per-base output DataFrames** (not measured separately). Each chromosome
    becomes one row per nonzero base with an object `chrom` column, concatenated
    genome-wide before writing and pickled back to the parent in process mode.
@@ -59,26 +61,35 @@ itself was negligible.
    `motif_anchor_arrays`, and reads `chrom`/`name` with the pandas `string`
    dtype. Group once and read `chrom` as a category.
 
-6. **`kackle-metaplot` is too slow for whole genomes.** On hg38 there are
-   about 100M TGG/TGGAA sites per strand. In 0.2.0 each plot took 40–60
-   minutes (per-site Python loop with two bigWig reads per site). Batched
-   reads (#4) bound memory, but three costs remain: motif location (about 33
-   CPU-minutes for hg38) is repeated on every invocation, the whole-genome
-   motif BED table is materialized, and every site still gets a 101-base read.
-   A standalone prototype that fixes all three matched `metaplot_profile` to
-   float32 rounding. On hg38 it located sites in 4 minutes (16 processes) and
-   plotted 6 samples x 6 tracks in about 40 minutes:
-   - stream sites one chromosome at a time, with chromosomes in parallel;
-   - read each track densely once per chromosome, and sum over its *nonzero*
-     bases against a per-base site-count vector,
-     `sum_i sig[c_i + k] = sum_{p: sig[p] != 0} sig[p] * n_sites[p - k]`.
-     PRO-seq signal is sparse (about 12M covered bases genome-wide), so this
-     costs O(nnz × width) instead of O(sites × width);
-   - optionally cache sites (they depend only on the genome and motif specs),
-     overlay several "after" tracks in one figure, and plot each motif spec
-     separately instead of pooling them.
-
-   Avoid genome-scale `kackle-metaplot` runs until this lands.
+6. **`kackle-metaplot` after genome-scale streaming.** Measured on hg38 in
+   FASTA mode, one sample (about 115M sites per strand): 12:03 with `-w 4`
+   and 5:25 with `-w 8`, peaking at 11.2 GB per worker. On chr21 alone
+   (58 s), motif location was about half the runtime. The whole-genome run
+   hasn't been profiled by stage, so **profile chr1 before changing
+   anything**, to confirm where the time and the 11 GB actually go. In
+   likely order of payoff:
+   1. **Return start arrays from motif location** (item 2). Each worker
+      builds a sorted pandas BED6 table for its chromosome, with object
+      string columns (about 18M hits on chr1), only to pull out `start` per
+      strand. That is probably most of the per-worker peak memory as well as
+      of the location time (unconfirmed). This also speeds up `kackle`.
+   2. **Cache sites across invocations.** Sites depend only on the genome
+      and motif specs, but every plot repeats location (about 33 CPU-minutes
+      for hg38). A per-chromosome `.npz` cache keyed by FASTA and motif specs
+      would leave later plots, e.g. one per sample, with only reading and
+      summing. A standalone prototype that did this located hg38 sites in
+      4 minutes with 16 processes and reused them across 6 samples.
+   3. **Split large chromosomes across workers.** At `-w 8` the run is
+      bounded by chr1. Splitting a chromosome into chunks (with `flank`
+      bases of overlap, assigning each site to the chunk that holds it)
+      would let more workers help, but only pays off beyond about 8
+      workers.
+   4. **A numba kernel for the sparse sum.** `chrom_window_sums` does
+      `2 * flank + 1` NumPy gathers over each track's nonzero bases. A fused
+      numba loop would be faster but is a small share of the runtime now.
+   5. **Plot features** (not performance): overlay several "after" tracks
+      in one figure, and show each motif spec separately instead of pooling
+      them.
 
 ## Open questions
 
