@@ -45,6 +45,9 @@ kackle-metaplot = "kackle.plotting:run_metaplot"
 Homepage = "https://github.com/adamyhe/kackle"
 Repository = "https://github.com/adamyhe/kackle"
 Issues = "https://github.com/adamyhe/kackle/issues"
+Documentation = "https://github.com/adamyhe/kackle#readme"
+Changelog = "https://github.com/adamyhe/kackle/blob/main/CHANGELOG.md"
+Roadmap = "https://github.com/adamyhe/kackle/blob/main/ROADMAP.md"
 
 [tool.hatch.build]
 exclude = [
