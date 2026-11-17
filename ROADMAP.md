@@ -5,23 +5,57 @@ Known issues and planned work. Shipped changes go in
 
 ## Known issues
 
-### Screening contamination from nearby spikes
+### Screening contamination from nearby spikes (investigated; no fix adopted)
 
 The screen compares a site's artifact position with the mean of the rest of
-its `[anchor - source, anchor + source)` neighborhood. When another spike sits
-inside that neighborhood, it inflates the background, and a real artifact can
-fail the `threshold` test and go uncorrected. Dense artifact regions are
-therefore under-corrected. The error is in the conservative direction (signal
-is left alone, not corrupted), but it is common wherever motifs cluster.
+its `[anchor - source, anchor + source)` neighborhood, so a spike at a nearby
+candidate inflates that background and can hide a real artifact.
 `test_correct_kmers_conserves_cluster_totals_under_parallel_dense_overlaps`
-shows it: some planted spikes there are never flagged.
+shows it on planted spikes.
 
-Possible fixes, each of which changes which sites get flagged:
+On the 6 PRO-seq samples (hg38, TGG pass, 1.9–2.8M sites flagged per sample),
+the candidate fixes would add:
 
-- a robust background, such as the median of the neighborhood, or a mean that
-  excludes other candidate artifact positions;
-- iterating: screen, correct, then re-screen the remaining candidates against
-  the corrected signal until nothing new is flagged.
+| fix | extra flags | notes |
+|---|---|---|
+| mean excluding other candidates' artifact bases | +2.0–2.6% | drops non-spike candidates from the background too |
+| re-screen the corrected signal | +1.2–1.6% | 5% of additions are resampled draws flagged again |
+| re-screen: original value vs neighborhood with flagged target windows left out | +1.4–1.9% | deterministic |
+| median background | +15% (TGG), +100% (TGGAA) | the median is usually 0 in sparse PRO-seq |
+
+The added sites are weak (71–78% have 1–2 reads). The deterministic re-screen
+was implemented and validated (exactly equal to 0.2.0 when off; nothing
+changed outside motif windows; chunking still exact), but it made per-motif
+metaplots worse. The artifact-base / flank ratio fell in every sample, on
+both strands and motifs: TGG 0.92–1.06 → 0.89–1.00 (mean 0.99 → 0.94),
+TGGAA:1 0.82–0.92 → 0.80–0.88. It also removed 0.2–0.45% more of the
+total signal. Replacing extra 1–2-read bases with flank-level values pulls
+the average below the flank. It also doesn't make the TGGAA:1 pass
+unnecessary: with the TGG pass alone, TGGAA:1 sites stay at 1.5–2.0× their
+flanks either way. So the contamination is real but small, and fixing it
+this way costs more than it gains. Revisit only together with the
+low-count issue below.
+
+### Single reads on an empty background count as artifacts
+
+A site is flagged when its artifact base exceeds `threshold` times the
+neighborhood mean, so with no other reads within ±`source`, one read is
+enough (1 > 10 × 0). On the 6 samples, 36–41% of flagged TGG sites have a
+single read at the artifact base, and about 70% have a background of 0.
+Given the ~11–18× enrichment at artifact bases, most such reads are
+probably artifacts, so removing them is likely right on average. But it is
+what made re-screening over-correct. Any change to the screen (a minimum
+read count, or a pseudocount in the background) should be judged by the
+same per-motif metaplots on real samples, not by flag counts.
+
+### Resampling flattens natural structure inside the target window
+
+The whole `[anchor - target, anchor + target)` window of a flagged site is
+redrawn from its flanks, not only the artifact base. Metaplots show the
+input's own dips near TGG sites (about 0.7 of the flank at offsets −6 to −3
+on the plus strand) raised to about 1.0 after correction, in every version.
+Resampling only the artifact base, or preserving the window's shape, would
+change every corrected site's output.
 
 ### Resampled total isn't density-preserving when `source - target != target`
 
@@ -118,13 +152,14 @@ figure, and show each motif spec separately instead of pooling them.
 
 ## Open questions
 
-### Corrected TGGAA sites sit slightly below their flanks
+### Corrected TGGAA sites sit slightly below their flanks (answered)
 
-On 6 real PRO-seq samples, the signal at the TGGAA:1 artifact position after
-correction is 0.88–0.90 of the mean at ±20–50 bp, compared with 0.99–1.01
-at TGG sites and about 14× in the input. This holds for every version,
-v0.1.0 included. It could be mild over-correction: TGGAA sites are almost
-all TGG sites too, so they have already been corrected once by the first
-pass. Or the artifact position could have genuinely lower signal. A check:
-compare against a library without the primer artifact, or against TGGAA
-sites that the TGG pass did not flag.
+After correction, TGGAA:1 sites sit at 0.82–0.92 of their 20–50 bp flanks,
+compared with about 1.0 at TGG sites. It is not over-correction from being
+corrected twice. 57% of TGGAA:1 sites have no TGG at the same anchor (the
+mismatch is in the first three bases), and those sites have low signal at
+that base already in the uncorrected input (0.30–0.37 of the flank). Averaging
+them with the TGG-containing sites gives about 0.9. TGGAA sites that the TGG
+pass flagged look low (about 0.75) only through selection: those whose
+resampled value came out high are the ones the second pass flags again.
+(6 PRO-seq samples, hg38.)
