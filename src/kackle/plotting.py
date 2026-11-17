@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 
-from kackle.bigwig import read_chrom_values
+from kackle.bigwig import bigwig_chrom_sizes, read_chrom_values
 from kackle.cli_common import (
     DEFAULT_MOTIFS,
     KackleArgumentFormatter,
@@ -137,13 +137,24 @@ def metaplot_profile(
 # ---------------------------------------------------------------------------
 
 
-def _dense_signal(values, length, absolute):
-    """Trim to ``length``, optionally take ``abs``, and zero non-finite values."""
-    values = np.asarray(values[:length])
+def _dense_signal(values, length, absolute, in_place=False):
+    """Trim to ``length``, optionally take ``abs``, and zero non-finite values.
+
+    With ``in_place``, ``values`` (a writable float array the caller owns) is
+    modified instead of copied, which avoids a second chromosome-sized array.
+    """
+    values = np.asarray(values)[:length]
+    in_place = (
+        in_place and values.flags.writeable and np.issubdtype(values.dtype, np.floating)
+    )
     if absolute:
-        values = np.abs(values)
-    if not np.isfinite(values).all():
-        values = np.where(np.isfinite(values), values, 0.0)
+        values = np.abs(values, out=values) if in_place else np.abs(values)
+    finite = np.isfinite(values)
+    if not finite.all():
+        if in_place:
+            values[~finite] = 0.0
+        else:
+            values = np.where(finite, values, 0.0)
     return values
 
 
@@ -151,14 +162,38 @@ def _site_count_vector(centers, length, flank):
     """Per-base site multiplicity, shifted by ``flank`` so index ``q + flank`` is site ``q``.
 
     Only sites in ``[-flank, length + flank)`` can reach a base on the
-    chromosome, so others are dropped. Stored as int32 to halve memory on
-    long chromosomes.
+    chromosome, so others are dropped. Uses the smallest unsigned dtype that
+    holds the largest multiplicity: uint8 in practice (FASTA-mode duplicates
+    come only from pooling motif specs), a quarter of int32 on long
+    chromosomes.
     """
     keep = centers[(centers >= -flank) & (centers < length + flank)] + flank
-    site_count = np.zeros(length + 2 * flank, dtype=np.int32)
     positions, multiplicity = np.unique(keep, return_counts=True)
+    top = int(multiplicity.max()) if multiplicity.size else 0
+    dtype = np.uint8 if top <= 0xFF else np.uint16 if top <= 0xFFFF else np.uint32
+    site_count = np.zeros(length + 2 * flank, dtype=dtype)
     site_count[positions] = multiplicity
     return site_count
+
+
+def _window_counts(sorted_centers, length, flank):
+    """Sites whose ``c + k`` lands in ``[0, length)``, for each offset ``k``."""
+    offsets = np.arange(-flank, flank + 1)
+    counts = np.searchsorted(sorted_centers, length - offsets) - np.searchsorted(
+        sorted_centers, -offsets
+    )
+    return np.maximum(counts, 0).astype(np.int64)
+
+
+def _track_window_sum(signal, site_count, flank):
+    """``sum_i signal[c_i + k]`` for each offset, via the nonzero bases of ``signal``."""
+    pos = np.flatnonzero(signal)
+    vals = signal[pos].astype(np.float64)
+    track_sum = np.empty(2 * flank + 1, dtype=np.float64)
+    for j, k in enumerate(range(-flank, flank + 1)):
+        # pos - k + flank is always within [0, length + 2 * flank).
+        track_sum[j] = np.dot(vals, site_count[pos - k + flank])
+    return track_sum
 
 
 def chrom_window_sums(before_values, after_values, centers, flank, absolute=False):
@@ -167,9 +202,10 @@ def chrom_window_sums(before_values, after_values, centers, flank, absolute=Fals
     Parameters
     ----------
     before_values, after_values : numpy.ndarray
-        Dense per-base signal for the whole chromosome. If the lengths differ,
-        both are truncated to the shorter one, matching ``metaplot_profile``,
-        which only counts offsets that are on-chromosome in both tracks.
+        Dense per-base signal for the whole chromosome (not modified). If the
+        lengths differ, both are truncated to the shorter one, matching
+        ``metaplot_profile``, which only counts offsets that are
+        on-chromosome in both tracks.
     centers : array-like of int
         Motif start coordinates (duplicates count once per occurrence).
     flank : int
@@ -177,32 +213,43 @@ def chrom_window_sums(before_values, after_values, centers, flank, absolute=Fals
     absolute : bool
         Aggregate absolute values (for negative minus-strand bigWigs).
     """
-    width = 2 * flank + 1
     length = min(len(before_values), len(after_values))
     centers = np.sort(np.asarray(centers, dtype=np.int64))
-    offsets = np.arange(-flank, flank + 1)
-    # counts[j]: sites whose c + k lands in [0, length).
-    counts = np.searchsorted(centers, length - offsets) - np.searchsorted(
-        centers, -offsets
-    )
-    sums = []
+    counts = _window_counts(centers, length, flank)
     if centers.size == 0 or length == 0:
-        zeros = np.zeros(width, dtype=np.float64)
-        return zeros, zeros.copy(), np.maximum(counts, 0).astype(np.int64)
+        zeros = np.zeros(2 * flank + 1, dtype=np.float64)
+        return zeros, zeros.copy(), counts
     site_count = _site_count_vector(centers, length, flank)
-    for values in (before_values, after_values):
-        signal = _dense_signal(values, length, absolute)
-        pos = np.flatnonzero(signal)
-        vals = signal[pos].astype(np.float64)
-        track_sum = np.empty(width, dtype=np.float64)
-        for j, k in enumerate(offsets):
-            # pos - k + flank is always within [0, length + 2 * flank).
-            track_sum[j] = np.dot(vals, site_count[pos - k + flank])
-        sums.append(track_sum)
-    return sums[0], sums[1], counts.astype(np.int64)
+    before_sum, after_sum = (
+        _track_window_sum(_dense_signal(values, length, absolute), site_count, flank)
+        for values in (before_values, after_values)
+    )
+    return before_sum, after_sum, counts
 
 
 STRAND_ABSOLUTE = {"+": False, "-": True}
+
+
+def _provider_sites(provider, chrom):
+    """``{strand: starts}`` for one chromosome, pooled over motif specs.
+
+    Pulls the start arrays out of each motif table and drops the tables right
+    away, so they don't overlap with the dense-track phase (and are never
+    concatenated into one more copy).
+    """
+    parts = {strand: [] for strand in STRAND_ABSOLUTE}
+    beds = provider.for_chrom(chrom)
+    while beds:
+        bed = beds.pop()
+        strands = bed["strand"].to_numpy()
+        starts = bed["start"].to_numpy(np.int64)
+        for strand in STRAND_ABSOLUTE:
+            parts[strand].append(starts[strands == strand])
+        del bed, strands, starts
+    return {
+        strand: np.concatenate(arrays) if arrays else np.empty(0, dtype=np.int64)
+        for strand, arrays in parts.items()
+    }
 
 
 def _chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank):
@@ -210,31 +257,33 @@ def _chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank):
 
     ``chrom_sites`` maps strand to motif-start arrays (BED mode); otherwise
     ``provider`` locates this chromosome's sites here, so FASTA-mode motif
-    location runs in parallel and no genome-wide site table is built.
+    location runs in parallel and no genome-wide site table is built. To keep
+    the peak low, only one dense track is in memory at a time.
     """
     if chrom_sites is None:
-        beds = [bed for bed in provider.for_chrom(chrom) if len(bed)]
-        bed = pd.concat(beds, ignore_index=True) if beds else None
-        chrom_sites = {
-            strand: (
-                np.empty(0, dtype=np.int64)
-                if bed is None
-                else bed.loc[bed.strand == strand, "start"].to_numpy(np.int64)
-            )
-            for strand in STRAND_ABSOLUTE
-        }
+        chrom_sites = _provider_sites(provider, chrom)
     out = {}
     for strand, absolute in STRAND_ABSOLUTE.items():
         before_fname, after_fname = bigwigs[strand]
         centers = chrom_sites.get(strand)
         if centers is None or len(centers) == 0:
             continue
-        try:
-            before = read_chrom_values(before_fname, chrom)
-            after = read_chrom_values(after_fname, chrom)
-        except KeyError:
+        before_sizes = bigwig_chrom_sizes(before_fname)
+        after_sizes = bigwig_chrom_sizes(after_fname)
+        if chrom not in before_sizes or chrom not in after_sizes:
             continue  # chromosome missing from this strand's bigWig pair
-        out[strand] = chrom_window_sums(before, after, centers, flank, absolute)
+        length = min(int(before_sizes[chrom]), int(after_sizes[chrom]))
+        centers = np.sort(np.asarray(centers, dtype=np.int64))
+        counts = _window_counts(centers, length, flank)
+        site_count = _site_count_vector(centers, length, flank)
+        sums = []
+        for fname in (before_fname, after_fname):
+            values = read_chrom_values(fname, chrom)
+            signal = _dense_signal(values, length, absolute, in_place=True)
+            sums.append(_track_window_sum(signal, site_count, flank))
+            del values, signal
+        del site_count
+        out[strand] = (sums[0], sums[1], counts)
     return out
 
 
@@ -265,7 +314,7 @@ def metaplot_profiles(
     chrom_workers : int
         Chromosomes processed concurrently. Each worker holds one
         chromosome's sequence, motif sites, two dense tracks and a site-count
-        vector: peak about 11 GB in FASTA mode on hg38 (chr1).
+        vector: peak about 7 GB in FASTA mode on hg38 (chr1).
     worker_backend : {"process", "thread"}
         Executor used when ``chrom_workers > 1``.
     """
@@ -515,7 +564,7 @@ def parse_metaplot_args():
         default="auto",
         help=(
             "Chromosomes processed concurrently (motif location and summing). "
-            "FASTA mode on hg38 peaks at about 11 GB per worker (chr1). "
+            "FASTA mode on hg38 peaks at about 7 GB per worker (chr1). "
             "auto uses min(chromosomes, CPUs, 4)."
         ),
     )

@@ -24,8 +24,13 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   instead of reading a 101-base window per site. No genome-wide site table is
   built. Output is unchanged (matches the windowed implementation to
   floating-point rounding). A whole-genome hg38 plot (about 115M sites per
-  strand, pooled over both motifs) takes 12 minutes with 4 workers or 5.5
-  minutes with 8, with about 11 GB peak per worker. 0.2.0 took 40–60 minutes.
+  strand, pooled over both motifs) takes about 8 minutes with 4 workers or 5
+  with 8, with about 7 GB peak per worker. 0.2.0 took 40–60 minutes.
+- **Lower `kackle-metaplot` memory per worker.** Motif tables are dropped as
+  soon as the start arrays are extracted, tracks are read, summed and freed
+  one at a time, and the per-base site-count vector is uint8 instead of
+  int32. On hg38, peak RSS per worker fell from 11.2 GB to 6.9 GB (34.8 GB
+  for the whole run at `-w 8`), with byte-identical output.
 - **bigWig I/O uses figwig instead of pybigtools**
   ([#4](https://github.com/adamyhe/kackle/pull/4)). figwig's reader threads are
   capped at the per-worker numba thread count. `write_bigwig` writes one chromosome at a
