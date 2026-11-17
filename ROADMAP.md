@@ -128,8 +128,3 @@ all TGG sites too, so they have already been corrected once by the first
 pass. Or the artifact position could have genuinely lower signal. A check:
 compare against a library without the primer artifact, or against TGGAA
 sites that the TGG pass did not flag.
-
-## In progress elsewhere
-
-- `compare-versions` branch: scripts to compare outputs across releases,
-  with an exact (seeded, un-jitted) mode and a statistical mode.
