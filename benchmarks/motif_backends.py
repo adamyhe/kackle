@@ -1,8 +1,11 @@
 """Benchmark motif matching backends.
 
 The benchmark creates a synthetic multi-record FASTA, locates the default
-kackle motifs on the last chromosome, and compares the pure-Python scanner
-against the default ``ahocorasick-rs`` matcher (both read FASTA via pyfaidx).
+kackle motifs on the last chromosome with ``FastaMotifSiteProvider.starts_for_chrom``,
+and compares the default numba matcher with the pure-Python reference (both
+read FASTA via pyfaidx). Each backend gets one
+untimed warm-up call, so numba compilation isn't counted, and every backend
+must return identical starts.
 """
 
 from __future__ import annotations
@@ -44,20 +47,17 @@ def time_provider(fasta, chrom, match_backend, repeats):
         both_strands=True,
         match_backend=match_backend,
     )
+    reference = provider.starts_for_chrom(chrom)  # warm-up (numba compile)
     timings = []
-    counts = None
     for _ in range(repeats):
         start = time.perf_counter()
-        beds = provider.for_chrom(chrom)
+        spec_starts = provider.starts_for_chrom(chrom)
         timings.append(time.perf_counter() - start)
-        current_counts = tuple(len(bed) for bed in beds)
-        if counts is None:
-            counts = current_counts
-        elif counts != current_counts:
-            raise RuntimeError(
-                f"Backend {match_backend} produced inconsistent counts"
-            )
-    return statistics.median(timings), counts
+        for got, want in zip(spec_starts, reference):
+            for strand in ("+", "-"):
+                if not np.array_equal(got[strand], want[strand]):
+                    raise RuntimeError(f"Backend {match_backend} is not deterministic")
+    return statistics.median(timings), reference
 
 
 def main() -> None:
@@ -73,15 +73,24 @@ def main() -> None:
         write_fasta(fasta, args.records, args.length)
         chrom = f"chr{args.records}"
         results = []
-        for match_backend in ("ahocorasick", "python"):
-            elapsed, counts = time_provider(fasta, chrom, match_backend, args.repeats)
-            results.append((match_backend, elapsed, counts))
+        for match_backend in ("numba", "python"):
+            elapsed, spec_starts = time_provider(
+                fasta, chrom, match_backend, args.repeats
+            )
+            results.append((match_backend, elapsed, spec_starts))
 
     default_time = results[0][1]
-    print("match_backend\tseconds\tvs_default\thits")
-    for match_backend, elapsed, counts in results:
+    reference = results[0][2]
+    print("match_backend\tseconds\tvs_default\thits\tidentical")
+    for match_backend, elapsed, spec_starts in results:
         relative = default_time / elapsed
-        print(f"{match_backend}\t{elapsed:.6f}\t{relative:.2f}x\t{counts}")
+        hits = tuple(int(s["+"].size + s["-"].size) for s in spec_starts)
+        identical = all(
+            np.array_equal(a[strand], b[strand])
+            for a, b in zip(spec_starts, reference)
+            for strand in ("+", "-")
+        )
+        print(f"{match_backend}\t{elapsed:.6f}\t{relative:.2f}x\t{hits}\t{identical}")
 
 
 if __name__ == "__main__":

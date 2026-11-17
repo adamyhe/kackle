@@ -199,3 +199,79 @@ def correct_kmers(
         for j in range(width):
             out_vec[span_lo + j] = resampled[j]
     return out_vec
+
+
+# ---------------------------------------------------------------------------
+# Motif matching
+# ---------------------------------------------------------------------------
+
+_MOTIF_CHUNK = 1 << 16
+
+
+@njit(cache=True, inline="always")
+def _window_matches(sequence, start, pattern, max_mismatches):
+    """Whether ``sequence[start:start + k]`` is all A/C/G/T within Hamming distance.
+
+    Bytes are uppercased with ``& 0xDF`` (ASCII letters only). A window with
+    any other base (N, IUPAC codes, gaps) never matches, which is what an
+    exact search over the A/C/G/T mismatch variants of ``pattern`` gives.
+    """
+    mismatches = 0
+    for j in range(pattern.shape[0]):
+        base = sequence[start + j] & 0xDF
+        if base != 65 and base != 67 and base != 71 and base != 84:  # A C G T
+            return False
+        if base != pattern[j]:
+            mismatches += 1
+            if mismatches > max_mismatches:
+                return False
+    return True
+
+
+@njit(parallel=True, cache=True)
+def motif_window_starts(sequence, pattern, max_mismatches):
+    """Return sorted starts of windows that match ``pattern`` (see ``_window_matches``).
+
+    ``kackle.motifs._python_window_starts`` is the independent reference this
+    is tested against, and the fallback when numba JIT is disabled.
+
+    Parameters
+    ----------
+    sequence : numpy.ndarray of uint8
+        ASCII sequence bytes, any case.
+    pattern : numpy.ndarray of uint8
+        Uppercase A/C/G/T motif bytes.
+    max_mismatches : int
+        Maximum substitutions allowed.
+
+    Two parallel passes over fixed-size chunks: count matches per chunk, then
+    fill each chunk's slice of the output, so starts come out sorted and
+    unique without a sort.
+    """
+    k = pattern.shape[0]
+    n_windows = sequence.shape[0] - k + 1
+    if k == 0 or n_windows <= 0:
+        return np.empty(0, dtype=np.int64)
+    n_chunks = (n_windows + _MOTIF_CHUNK - 1) // _MOTIF_CHUNK
+    counts = np.zeros(n_chunks, dtype=np.int64)
+    for chunk in prange(n_chunks):
+        lo = chunk * _MOTIF_CHUNK
+        hi = min(lo + _MOTIF_CHUNK, n_windows)
+        found = 0
+        for start in range(lo, hi):
+            if _window_matches(sequence, start, pattern, max_mismatches):
+                found += 1
+        counts[chunk] = found
+    offsets = np.zeros(n_chunks + 1, dtype=np.int64)
+    for chunk in range(n_chunks):
+        offsets[chunk + 1] = offsets[chunk] + counts[chunk]
+    starts = np.empty(offsets[n_chunks], dtype=np.int64)
+    for chunk in prange(n_chunks):
+        lo = chunk * _MOTIF_CHUNK
+        hi = min(lo + _MOTIF_CHUNK, n_windows)
+        out = offsets[chunk]
+        for start in range(lo, hi):
+            if _window_matches(sequence, start, pattern, max_mismatches):
+                starts[out] = start
+                out += 1
+    return starts

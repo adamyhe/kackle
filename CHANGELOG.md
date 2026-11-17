@@ -18,6 +18,19 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
 
 ### Changed
 
+- **Motif location returns start arrays and uses a numba kernel.**
+  `FastaMotifSiteProvider.starts_for_chrom` and the new `locate_motif_starts`
+  return sorted per-strand start arrays from a numba Hamming-distance kernel,
+  instead of building a sorted pandas BED6 table for every motif. `kackle`
+  locates only the strand each pass corrects. BED6 tables are built only for
+  `--out-bed6-prefix` and the `locate_motif*` / `for_chrom` helpers, with the
+  same contents as before. Sites are identical to 0.2.0. On hg38, locating
+  all sites fell from 22 minutes and 9.1 GB to 39 s and 0.8 GB; a `kackle`
+  run with 4 workers from 40 to 4 minutes (37.7 to 10.4 GB peak), and a
+  whole-genome `kackle-metaplot` from 5 minutes to 1 with 8 workers (6.9 to
+  1.8 GB per worker).
+  `--motif-match-backend` now takes `auto` (default: numba, or `python`
+  when numba JIT is disabled), `numba` or `python`.
 - **`kackle-metaplot` runs at genome scale.** It now works one chromosome at
   a time: sites are located per chromosome (in parallel), each track is read
   densely once, and the profile is summed over the track's nonzero bases
@@ -58,6 +71,8 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   ([#4](https://github.com/adamyhe/kackle/pull/4)). Passing
   `--fasta-backend` is now an argparse error. The `python` motif-match
   backend is kept as a reference implementation.
+- The ahocorasick-rs dependency. `--motif-match-backend ahocorasick` (and
+  `match_backend="ahocorasick"`) still work as a deprecated alias for `auto`.
 
 ### Fixed
 

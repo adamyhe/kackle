@@ -80,17 +80,43 @@ def motif_bed6_fnames(out_prefix, motif_specs):
     return bed6_fnames
 
 
-def _chrom_motif_beds(motif_site_provider, chrom, isolate_fasta=False):
-    """Return motif beds for one chromosome, optionally isolating FASTA state."""
+def _isolated_provider(motif_site_provider, isolate_fasta):
+    """A fresh FASTA provider (own pyfaidx handle, no BED6 output) when isolating."""
     if isolate_fasta and isinstance(motif_site_provider, FastaMotifSiteProvider):
-        provider = FastaMotifSiteProvider(
+        return FastaMotifSiteProvider(
             motif_site_provider.fasta_fname,
             motif_site_provider.motif_specs,
             both_strands=motif_site_provider.both_strands,
             match_backend=motif_site_provider.match_backend,
         )
-        return provider.for_chrom(chrom)
-    return motif_site_provider.for_chrom(chrom)
+    return motif_site_provider
+
+
+def _provider_anchor_arrays(motif_site_provider, chrom, strand, keep_sites, isolate_fasta):
+    """Ordered per-pass anchor arrays for one chromosome from a motif provider.
+
+    Providers with ``starts_for_chrom`` (``FastaMotifSiteProvider``) return
+    start arrays directly, and only the strand being corrected is located
+    unless ``keep_sites`` asks for both (for ``--out-bed6-prefix``). Minus
+    anchors are ``start + len(motif)``, the BED ``end`` column. Other
+    providers go through their ``for_chrom`` BED tables.
+
+    Returns ``(anchor_arrays, sites)``, where ``sites`` is the
+    ``starts_for_chrom`` output when ``keep_sites`` is true, else ``None``.
+    """
+    provider = _isolated_provider(motif_site_provider, isolate_fasta)
+    if not hasattr(provider, "starts_for_chrom"):
+        beds = provider.for_chrom(chrom)
+        return motif_anchor_arrays(beds, strand), None
+    strands = ("+", "-") if keep_sites else (strand,)
+    spec_starts = provider.starts_for_chrom(chrom, strands=strands)
+    anchors = []
+    for spec, starts in zip(provider.motif_specs, spec_starts):
+        strand_starts = starts[strand]
+        if strand == "-":
+            strand_starts = strand_starts + len(spec.motif)
+        anchors.append(strand_starts.astype(np.int32))
+    return anchors, (spec_starts if keep_sites else None)
 
 
 def motif_anchor_arrays(motif_beds, strand, chrom=None):
@@ -107,17 +133,20 @@ def motif_anchor_arrays(motif_beds, strand, chrom=None):
     return arrays
 
 
-def _append_motif_beds_for_chrom(motif_site_provider, chrom, beds):
-    """Append generated FASTA motif beds once, preserving chromosome order."""
-    if not isinstance(motif_site_provider, FastaMotifSiteProvider):
+def _needs_bed6_sites(motif_site_provider, chrom):
+    """Whether this chromosome's sites still have to be written to BED6 files."""
+    return (
+        isinstance(motif_site_provider, FastaMotifSiteProvider)
+        and motif_site_provider.bed6_fnames is not None
+        and chrom not in motif_site_provider._written_chroms
+    )
+
+
+def _append_motif_sites_for_chrom(motif_site_provider, chrom, sites):
+    """Append generated FASTA motif sites once, preserving chromosome order."""
+    if sites is None or not isinstance(motif_site_provider, FastaMotifSiteProvider):
         return
-    if motif_site_provider.bed6_fnames is None:
-        return
-    if chrom in motif_site_provider._written_chroms:
-        return
-    for bed, bed6_fname in zip(beds, motif_site_provider.bed6_fnames):
-        bed.to_csv(bed6_fname, sep="\t", header=False, index=False, mode="a")
-    motif_site_provider._written_chroms.add(chrom)
+    motif_site_provider.write_bed6(chrom, sites)
 
 
 def _correct_chromosome(
@@ -132,8 +161,13 @@ def _correct_chromosome(
     threshold,
     isolate_fasta_provider=False,
     numba_threads=None,
+    keep_sites=False,
 ):
-    """Correct one chromosome and return sparse output plus motif beds used."""
+    """Correct one chromosome; return ``(chrom, sparse output, sites or None)``.
+
+    ``sites`` is the provider's ``starts_for_chrom`` output when
+    ``keep_sites`` is set (so the parent can write ``--out-bed6-prefix``).
+    """
     if numba_threads is not None:
         from numba import set_num_threads
 
@@ -146,15 +180,16 @@ def _correct_chromosome(
     if strand == "-":
         values = np.abs(values)
     corrected_signal = values
+    chrom_sites = None
     if motif_site_provider is not None:
-        chrom_motif_beds = _chrom_motif_beds(
+        motif_start_arrays, chrom_sites = _provider_anchor_arrays(
             motif_site_provider,
             chrom,
+            strand,
+            keep_sites=keep_sites,
             isolate_fasta=isolate_fasta_provider,
         )
-        motif_start_arrays = motif_anchor_arrays(chrom_motif_beds, strand)
     else:
-        chrom_motif_beds = motif_beds or []
         motif_start_arrays = motif_start_arrays or []
 
     for starts in motif_start_arrays:
@@ -178,7 +213,7 @@ def _correct_chromosome(
             "value": corrected_signal[nonzero_starts].astype(np.float64),
         }
     )
-    return chrom, corrected_df, chrom_motif_beds
+    return chrom, corrected_df, chrom_sites
 
 
 def kmer_resample(
@@ -208,9 +243,10 @@ def kmer_resample(
         Ordered BED6-style motif location tables. Each table is applied as a
         separate correction pass to preserve sequential correction semantics.
     motif_site_provider : object, optional
-        Provider with ``for_chrom(chrom)`` that returns ordered BED6-style
-        motif tables for a chromosome. FASTA mode uses this to avoid
-        materializing whole-genome motif locations.
+        Locates motif sites one chromosome at a time. ``FastaMotifSiteProvider``
+        (FASTA mode) supplies sorted start arrays via ``starts_for_chrom``;
+        any other object with ``for_chrom(chrom)`` returning ordered BED6-style
+        tables also works.
     strand : {"+", "-"}
         Signal/motif strand to correct.
     chroms : sequence[str], optional
@@ -257,11 +293,10 @@ def kmer_resample(
             disable=not verbose,
             desc=f"Correcting {'plus' if strand == '+' else 'minus'} strand kmers",
         ):
-            chrom_motif_beds = None
             chrom_start_arrays = None
             if motif_site_provider is None:
                 chrom_start_arrays = motif_anchor_arrays(motif_beds, strand, chrom)
-            _, corrected_df, chrom_motif_beds = _correct_chromosome(
+            _, corrected_df, chrom_sites = _correct_chromosome(
                 bw_fname,
                 chrom,
                 None,
@@ -273,8 +308,9 @@ def kmer_resample(
                 threshold,
                 False,
                 numba_threads,
+                keep_sites=_needs_bed6_sites(motif_site_provider, chrom),
             )
-            _append_motif_beds_for_chrom(motif_site_provider, chrom, chrom_motif_beds)
+            _append_motif_sites_for_chrom(motif_site_provider, chrom, chrom_sites)
             dfs.append(corrected_df)
         return pd.concat(dfs, ignore_index=True)
 
@@ -304,6 +340,7 @@ def kmer_resample(
                 threshold,
                 True,
                 numba_threads,
+                _needs_bed6_sites(motif_site_provider, chrom),
             ): chrom
             for chrom, chrom_start_arrays in task_args
         }
@@ -316,13 +353,13 @@ def kmer_resample(
                 f"kmers ({chrom_workers} chrom workers)"
             ),
         ):
-            chrom, corrected_df, chrom_motif_beds = future.result()
-            results[chrom] = (corrected_df, chrom_motif_beds)
+            chrom, corrected_df, chrom_sites = future.result()
+            results[chrom] = (corrected_df, chrom_sites)
 
     dfs = []
     for chrom in chroms:
-        corrected_df, chrom_motif_beds = results[chrom]
-        _append_motif_beds_for_chrom(motif_site_provider, chrom, chrom_motif_beds)
+        corrected_df, chrom_sites = results[chrom]
+        _append_motif_sites_for_chrom(motif_site_provider, chrom, chrom_sites)
         dfs.append(corrected_df)
     return pd.concat(dfs, ignore_index=True)
 
@@ -341,7 +378,7 @@ def parse_args():
 
               kackle -i plus.bw -I minus.bw -f genome.fa -o corrected.plus.bw -O corrected.minus.bw -c chrom.sizes
 
-            FASTA mode defaults to motif passes {", ".join(DEFAULT_MOTIFS)} and locates sites one chromosome at a time using pyfaidx plus ahocorasick-rs.
+            FASTA mode defaults to motif passes {", ".join(DEFAULT_MOTIFS)} and locates sites one chromosome at a time using pyfaidx and a numba motif matcher.
             """
         ),
         formatter_class=KackleArgumentFormatter,
@@ -444,11 +481,13 @@ def parse_args():
     )
     parser.add_argument(
         "--motif-match-backend",
-        choices=["auto", "python", "ahocorasick"],
-        default="ahocorasick",
+        choices=["auto", "numba", "python", "ahocorasick"],
+        default="auto",
         help=(
-            "Pattern matcher for --fasta mode. ahocorasick scans all expanded "
-            "mismatch variants together; python repeats str.find per variant."
+            "Motif matcher for --fasta mode; both give identical sites. auto "
+            "uses numba, or python when numba JIT is disabled. python runs "
+            "str.find per mismatch variant (a slower reference). ahocorasick "
+            "is a deprecated alias for auto."
         ),
     )
     parser.add_argument(

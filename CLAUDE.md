@@ -54,12 +54,18 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
 ### Module layout (`src/kackle/`)
 
 - `computation.py` — numba hot-path kernels only (`artifact_mask_serial/parallel`,
-  `resample_dirmult`, `resample_empirical`, `correct_kmers`). No pandas, no file I/O, no Python
+  `resample_dirmult`, `resample_empirical`, `correct_kmers`, and the motif matcher
+  `motif_window_starts`). No pandas, no file I/O, no Python
   objects beyond NumPy arrays — these are `@njit` compiled and must stay numba-compatible.
-- `motifs.py` — motif spec parsing (`KMER[:MISMATCHES]`), Hamming-neighborhood expansion
-  (`mismatch_variants`), sequence matching (`ahocorasick-rs` by default, plain-Python fallback),
-  and `FastaMotifSiteProvider`, which locates motif BED6 rows one chromosome at a time via indexed
-  `pyfaidx` access instead of materializing whole-genome motif tables. All FASTA reading goes
+- `motifs.py` — motif spec parsing (`KMER[:MISMATCHES]`), `locate_motif_starts` (sorted int64
+  start arrays per strand; backends `numba`, the default, and `python`, which runs `str.find`
+  over `mismatch_variants`, is the test reference, and is what `auto` picks when numba JIT is
+  disabled), and
+  `FastaMotifSiteProvider`, which locates sites one chromosome at a time via indexed `pyfaidx`
+  access. `starts_for_chrom()` returns arrays and is what both CLIs use. `for_chrom()` and the
+  `locate_motif*` helpers build BED6 tables from them (`bed_from_starts`) only when a table is
+  wanted, e.g. `--out-bed6-prefix`. A window matches when it is all A/C/G/T (any case) and within
+  the Hamming distance. Keep the backends identical; that's what the tests check. All FASTA reading goes
   through `open_fasta()` (pyfaidx, `.fai` index); there is no hand-rolled FASTA parser.
 - `bigwig.py` — the only boundary between in-memory dense arrays/sparse DataFrames and on-disk
   bigWig files, via `figwig` (`BigWigReader` / `write_bigwig`).
