@@ -62,17 +62,19 @@ itself was negligible.
    dtype. Group once and read `chrom` as a category.
 
 6. **`kackle-metaplot` after genome-scale streaming.** Measured on hg38 in
-   FASTA mode, one sample (about 115M sites per strand): 12:03 with `-w 4`
-   and 5:25 with `-w 8`, peaking at 11.2 GB per worker. On chr21 alone
+   FASTA mode, one sample (about 115M sites per strand): 8:09 with `-w 4`
+   and 5:03 with `-w 8`, peaking at 6.9 GB per worker (11.2 GB in #6,
+   before the memory changes below). On chr21 alone
    (58 s), motif location was about half the runtime. The whole-genome run
    hasn't been profiled by stage, so **profile chr1 before changing
-   anything**, to confirm where the time and the 11 GB actually go. In
-   likely order of payoff:
+   anything**, to confirm where the time goes.
+
+   **Speed**, in likely order of payoff:
    1. **Return start arrays from motif location** (item 2). Each worker
       builds a sorted pandas BED6 table for its chromosome, with object
       string columns (about 18M hits on chr1), only to pull out `start` per
-      strand. That is probably most of the per-worker peak memory as well as
-      of the location time (unconfirmed). This also speeds up `kackle`.
+      strand. This is also the largest remaining memory cost (below), and it
+      speeds up `kackle` too.
    2. **Cache sites across invocations.** Sites depend only on the genome
       and motif specs, but every plot repeats location (about 33 CPU-minutes
       for hg38). A per-chromosome `.npz` cache keyed by FASTA and motif specs
@@ -87,9 +89,31 @@ itself was negligible.
    4. **A numba kernel for the sparse sum.** `chrom_window_sums` does
       `2 * flank + 1` NumPy gathers over each track's nonzero bases. A fused
       numba loop would be faster but is a small share of the runtime now.
-   5. **Plot features** (not performance): overlay several "after" tracks
-      in one figure, and show each motif spec separately instead of pooling
-      them.
+
+   **Memory.** Peak memory scales with `-w`, one chromosome per worker. On
+   chr21 (46.7 Mb, 3M sites, `-w 1`), peak RSS was 2.04 GB, of which motif
+   location alone reached 1.13 GB, and the returned motif tables held 0.50 GB.
+   - **Done:** drop the motif tables as soon as the start arrays are pulled
+     out (they used to be concatenated into another copy and kept alive
+     through the track phase); read, sum and free one track at a time, with
+     `abs()` in place; store the site-count vector as uint8 instead of int32.
+     Peak per worker fell from 2.04 to 1.19 GB on chr21 and from 11.2 to
+     6.9 GB on the whole genome (34.8 GB total at `-w 8`), with byte-identical
+     output.
+   - **Next: return start arrays from motif location** (speed item 1). The
+     peak is now essentially motif location's own (1.13 of 1.19 GB on
+     chr21), from per-hit tuples, the duplicate-tracking set and the BED6
+     table. Plain int64 start arrays would be about 70 MB per strand on
+     chr1.
+   - **Read covered intervals instead of dense chromosomes.** Each track is
+     read as a dense float array over the whole chromosome (about 1 GB on
+     chr1), but PRO-seq covers only a few percent of bases. Reading
+     intervals would make track memory proportional to coverage. This
+     depends on whether figwig can return intervals rather than dense
+     values (not yet checked).
+
+   **Plot features** (not performance): overlay several "after" tracks in
+   one figure, and show each motif spec separately instead of pooling them.
 
 ## Open questions
 

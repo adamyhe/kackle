@@ -314,7 +314,7 @@ def metaplot_profiles(
     chrom_workers : int
         Chromosomes processed concurrently. Each worker holds one
         chromosome's sequence, motif sites, two dense tracks and a site-count
-        vector: peak about 11 GB in FASTA mode on hg38 (chr1).
+        vector: peak about 7 GB in FASTA mode on hg38 (chr1).
     worker_backend : {"process", "thread"}
         Executor used when ``chrom_workers > 1``.
     """
@@ -564,7 +564,7 @@ def parse_metaplot_args():
         default="auto",
         help=(
             "Chromosomes processed concurrently (motif location and summing). "
-            "FASTA mode on hg38 peaks at about 11 GB per worker (chr1). "
+            "FASTA mode on hg38 peaks at about 7 GB per worker (chr1). "
             "auto uses min(chromosomes, CPUs, 4)."
         ),
     )
