@@ -1,12 +1,14 @@
 """Metaplot utilities for before/after k-mer correction diagnostics."""
 
 import argparse
+import multiprocessing
 import textwrap
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 
-from kackle.bigwig import open_bigwig
+from kackle.bigwig import read_chrom_values
 from kackle.cli_common import (
     DEFAULT_MOTIFS,
     KackleArgumentFormatter,
@@ -123,6 +125,213 @@ def metaplot_profile(
     return x, before_mean, after_mean, counts
 
 
+# ---------------------------------------------------------------------------
+# Genome-scale path: one dense read per chromosome and track, sparse sums.
+#
+# For sites c_i on a chromosome of length L and a track sig,
+#     sum_i sig[c_i + k] = sum_{p : sig[p] != 0} sig[p] * n_sites[p - k],
+# where n_sites[q] counts sites at q. Nascent-RNA signal is sparse, so this
+# costs O(nnz * width) per track instead of O(n_sites * width) window reads.
+# It gives the same sums and counts as ``metaplot_profile``: bases with no
+# data count as 0, and offsets falling off the chromosome are excluded.
+# ---------------------------------------------------------------------------
+
+
+def _dense_signal(values, length, absolute):
+    """Trim to ``length``, optionally take ``abs``, and zero non-finite values."""
+    values = np.asarray(values[:length])
+    if absolute:
+        values = np.abs(values)
+    if not np.isfinite(values).all():
+        values = np.where(np.isfinite(values), values, 0.0)
+    return values
+
+
+def _site_count_vector(centers, length, flank):
+    """Per-base site multiplicity, shifted by ``flank`` so index ``q + flank`` is site ``q``.
+
+    Only sites in ``[-flank, length + flank)`` can reach a base on the
+    chromosome, so others are dropped. Stored as int32 to halve memory on
+    long chromosomes.
+    """
+    keep = centers[(centers >= -flank) & (centers < length + flank)] + flank
+    site_count = np.zeros(length + 2 * flank, dtype=np.int32)
+    positions, multiplicity = np.unique(keep, return_counts=True)
+    site_count[positions] = multiplicity
+    return site_count
+
+
+def chrom_window_sums(before_values, after_values, centers, flank, absolute=False):
+    """Return per-offset ``(before_sum, after_sum, counts)`` for one chromosome.
+
+    Parameters
+    ----------
+    before_values, after_values : numpy.ndarray
+        Dense per-base signal for the whole chromosome. If the lengths differ,
+        both are truncated to the shorter one, matching ``metaplot_profile``,
+        which only counts offsets that are on-chromosome in both tracks.
+    centers : array-like of int
+        Motif start coordinates (duplicates count once per occurrence).
+    flank : int
+        Bases on each side of the motif start.
+    absolute : bool
+        Aggregate absolute values (for negative minus-strand bigWigs).
+    """
+    width = 2 * flank + 1
+    length = min(len(before_values), len(after_values))
+    centers = np.sort(np.asarray(centers, dtype=np.int64))
+    offsets = np.arange(-flank, flank + 1)
+    # counts[j]: sites whose c + k lands in [0, length).
+    counts = np.searchsorted(centers, length - offsets) - np.searchsorted(
+        centers, -offsets
+    )
+    sums = []
+    if centers.size == 0 or length == 0:
+        zeros = np.zeros(width, dtype=np.float64)
+        return zeros, zeros.copy(), np.maximum(counts, 0).astype(np.int64)
+    site_count = _site_count_vector(centers, length, flank)
+    for values in (before_values, after_values):
+        signal = _dense_signal(values, length, absolute)
+        pos = np.flatnonzero(signal)
+        vals = signal[pos].astype(np.float64)
+        track_sum = np.empty(width, dtype=np.float64)
+        for j, k in enumerate(offsets):
+            # pos - k + flank is always within [0, length + 2 * flank).
+            track_sum[j] = np.dot(vals, site_count[pos - k + flank])
+        sums.append(track_sum)
+    return sums[0], sums[1], counts.astype(np.int64)
+
+
+STRAND_ABSOLUTE = {"+": False, "-": True}
+
+
+def _chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank):
+    """Sum one chromosome for both strands. Runs in a worker.
+
+    ``chrom_sites`` maps strand to motif-start arrays (BED mode); otherwise
+    ``provider`` locates this chromosome's sites here, so FASTA-mode motif
+    location runs in parallel and no genome-wide site table is built.
+    """
+    if chrom_sites is None:
+        beds = [bed for bed in provider.for_chrom(chrom) if len(bed)]
+        bed = pd.concat(beds, ignore_index=True) if beds else None
+        chrom_sites = {
+            strand: (
+                np.empty(0, dtype=np.int64)
+                if bed is None
+                else bed.loc[bed.strand == strand, "start"].to_numpy(np.int64)
+            )
+            for strand in STRAND_ABSOLUTE
+        }
+    out = {}
+    for strand, absolute in STRAND_ABSOLUTE.items():
+        before_fname, after_fname = bigwigs[strand]
+        centers = chrom_sites.get(strand)
+        if centers is None or len(centers) == 0:
+            continue
+        try:
+            before = read_chrom_values(before_fname, chrom)
+            after = read_chrom_values(after_fname, chrom)
+        except KeyError:
+            continue  # chromosome missing from this strand's bigWig pair
+        out[strand] = chrom_window_sums(before, after, centers, flank, absolute)
+    return out
+
+
+def metaplot_profiles(
+    bigwigs,
+    chroms,
+    flank,
+    sites=None,
+    provider=None,
+    chrom_workers=1,
+    worker_backend="process",
+):
+    """Return ``{strand: (x, before_mean, after_mean, counts)}`` over ``chroms``.
+
+    Parameters
+    ----------
+    bigwigs : dict
+        ``{"+": (before_pl, after_pl), "-": (before_mn, after_mn)}`` paths.
+    chroms : list of str
+        Chromosomes to include.
+    flank : int
+        Bases on each side of the motif start.
+    sites : dict, optional
+        ``{chrom: {strand: starts}}``. Exactly one of ``sites`` and
+        ``provider`` must be given.
+    provider : FastaMotifSiteProvider, optional
+        Locates sites per chromosome inside each worker.
+    chrom_workers : int
+        Chromosomes processed concurrently. Each worker holds two dense
+        tracks plus a site-count vector for one chromosome (about 4–5 GB for
+        hg38 chr1).
+    worker_backend : {"process", "thread"}
+        Executor used when ``chrom_workers > 1``.
+    """
+    if (sites is None) == (provider is None):
+        raise ValueError("pass exactly one of sites or provider")
+    width = 2 * flank + 1
+    totals = {
+        strand: [np.zeros(width), np.zeros(width), np.zeros(width, dtype=np.int64)]
+        for strand in STRAND_ABSOLUTE
+    }
+
+    def tasks():
+        for chrom in chroms:
+            chrom_sites = None if sites is None else sites.get(chrom)
+            if sites is not None and chrom_sites is None:
+                continue
+            yield chrom, chrom_sites
+
+    def add(result):
+        for strand, parts in result.items():
+            for total, part in zip(totals[strand], parts):
+                total += part
+
+    if chrom_workers <= 1:
+        for chrom, chrom_sites in tasks():
+            add(_chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank))
+    else:
+        if worker_backend == "process":
+            # spawn, not fork: the parent may already run figwig/numba threads,
+            # and forking a multi-threaded process can deadlock the child.
+            executor = ProcessPoolExecutor(
+                max_workers=chrom_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+        else:
+            executor = ThreadPoolExecutor(max_workers=chrom_workers)
+        with executor:
+            futures = [
+                executor.submit(
+                    _chrom_profile_task, chrom, bigwigs, chrom_sites, provider, flank
+                )
+                for chrom, chrom_sites in tasks()
+            ]
+            for future in futures:
+                add(future.result())
+
+    x = np.arange(-flank, flank + 1)
+    profiles = {}
+    for strand, (before_sum, after_sum, counts) in totals.items():
+        before_mean = np.full(width, np.nan, dtype=np.float64)
+        after_mean = np.full(width, np.nan, dtype=np.float64)
+        np.divide(before_sum, counts, out=before_mean, where=counts > 0)
+        np.divide(after_sum, counts, out=after_mean, where=counts > 0)
+        profiles[strand] = (x, before_mean, after_mean, counts)
+    return profiles
+
+
+def sites_by_chrom(bed):
+    """Split a BED6 table into ``{chrom: {strand: starts}}``, in first-seen chrom order."""
+    sites = {}
+    for (chrom, strand), rows in bed.groupby(["chrom", "strand"], sort=False):
+        if strand in STRAND_ABSOLUTE:
+            sites.setdefault(chrom, {})[strand] = rows["start"].to_numpy(np.int64)
+    return sites
+
+
 def write_metaplot_png(x, before, after, counts, strand, out_fname):
     """Write a before/after metaplot PNG for one strand."""
     import matplotlib
@@ -161,26 +370,56 @@ def write_strand_metaplots(
     bed,
     out_prefix,
     flank=50,
+    chrom_workers=1,
+    worker_backend="process",
 ):
-    """Write plus and minus before/after metaplots and return output paths."""
-    sites = motif_sites_by_strand(bed)
-    outputs = {}
-    plot_specs = {
-        "+": (before_pl_bw_fname, after_pl_bw_fname, False, f"{out_prefix}.plus.png"),
-        "-": (before_mn_bw_fname, after_mn_bw_fname, True, f"{out_prefix}.minus.png"),
-    }
+    """Write plus and minus before/after metaplots for BED sites and return output paths."""
+    sites = sites_by_chrom(bed)
+    profiles = metaplot_profiles(
+        _bigwig_pairs(
+            before_pl_bw_fname, before_mn_bw_fname, after_pl_bw_fname, after_mn_bw_fname
+        ),
+        list(sites),
+        flank,
+        sites=sites,
+        chrom_workers=chrom_workers,
+        worker_backend=worker_backend,
+    )
+    return write_profile_pngs(profiles, out_prefix)
 
-    for strand, (before_fname, after_fname, absolute, out_fname) in plot_specs.items():
-        x, before, after, counts = metaplot_profile(
-            open_bigwig(before_fname),
-            open_bigwig(after_fname),
-            sites[strand],
-            flank,
-            absolute=absolute,
-        )
-        write_metaplot_png(x, before, after, counts, strand, out_fname)
+
+def _bigwig_pairs(before_pl, before_mn, after_pl, after_mn):
+    return {"+": (str(before_pl), str(after_pl)), "-": (str(before_mn), str(after_mn))}
+
+
+def write_profile_tsv(profiles, out_fname):
+    """Write ``metaplot_profiles`` output as a long-format TSV.
+
+    Columns: ``strand``, ``offset``, ``before_mean``, ``after_mean``, ``n_sites``
+    (sites contributing at that offset).
+    """
+    with open(out_fname, "w") as handle:
+        handle.write("strand\toffset\tbefore_mean\tafter_mean\tn_sites\n")
+        for strand in ("+", "-"):
+            for x, before, after, count in zip(*profiles[strand]):
+                handle.write(f"{strand}\t{x}\t{before:.9g}\t{after:.9g}\t{count}\n")
+    return out_fname
+
+
+def write_profile_pngs(profiles, out_prefix):
+    """Write ``PREFIX.plus.png`` and ``PREFIX.minus.png`` from ``metaplot_profiles`` output."""
+    outputs = {}
+    for strand, suffix in (("+", "plus"), ("-", "minus")):
+        out_fname = f"{out_prefix}.{suffix}.png"
+        write_metaplot_png(*profiles[strand], strand, out_fname)
         outputs[strand] = out_fname
     return outputs
+
+
+def _positive_int_or_auto(value):
+    from kackle.correction import parse_positive_int_or_auto
+
+    return parse_positive_int_or_auto(value)
 
 
 def parse_metaplot_args():
@@ -269,11 +508,32 @@ def parse_metaplot_args():
         help="Bases to plot on each side of the motif start.",
     )
     parser.add_argument(
+        "-w",
+        "--chrom-workers",
+        metavar="N|auto",
+        type=_positive_int_or_auto,
+        default="auto",
+        help=(
+            "Chromosomes processed concurrently (motif location and summing). "
+            "Each worker holds about 4-5 GB for a 250 Mb chromosome. "
+            "auto uses min(chromosomes, CPUs, 4)."
+        ),
+    )
+    parser.add_argument(
+        "--worker-backend",
+        choices=["process", "thread"],
+        default="process",
+        help="Executor for chromosome workers.",
+    )
+    parser.add_argument(
         "-o",
         "--out-prefix",
         metavar="PREFIX",
         required=True,
-        help="Output prefix. Writes PREFIX.plus.png and PREFIX.minus.png.",
+        help=(
+            "Output prefix. Writes PREFIX.plus.png, PREFIX.minus.png, and the "
+            "plotted values as PREFIX.tsv."
+        ),
     )
     args = parser.parse_args()
     if args.fasta and args.chrom_sizes is None:
@@ -283,10 +543,17 @@ def parse_metaplot_args():
 
 def run_metaplot():
     """Run the before/after metaplot workflow."""
+    from kackle.correction import resolve_chrom_workers
+
     args = parse_metaplot_args()
+    bigwigs = _bigwig_pairs(
+        args.before_pl_bw, args.before_mn_bw, args.after_pl_bw, args.after_mn_bw
+    )
     if args.bed6:
-        bed = read_bed6(args.bed6)
+        sites = sites_by_chrom(read_bed6(args.bed6))
+        chroms, provider = list(sites), None
     else:
+        sites = None
         chroms = [chrom for chrom, _ in read_chrom_sizes(args.chrom_sizes)]
         chroms = intersect_ordered(
             chroms,
@@ -296,20 +563,23 @@ def run_metaplot():
             bigwig_chrom_names(args.after_mn_bw),
             fasta_chrom_names(args.fasta),
         )
-        bed = motif_beds_from_fasta(
+        # Builds the .fai once here, before any worker reads the FASTA.
+        provider = FastaMotifSiteProvider(
             args.fasta,
-            args.motif or DEFAULT_MOTIFS,
-            chroms,
+            args.motif or list(DEFAULT_MOTIFS),
             match_backend=args.motif_match_backend,
         )
-    outputs = write_strand_metaplots(
-        args.before_pl_bw,
-        args.before_mn_bw,
-        args.after_pl_bw,
-        args.after_mn_bw,
-        bed,
-        args.out_prefix,
-        flank=args.flank,
+    profiles = metaplot_profiles(
+        bigwigs,
+        chroms,
+        args.flank,
+        sites=sites,
+        provider=provider,
+        chrom_workers=resolve_chrom_workers(args.chrom_workers, max(1, len(chroms))),
+        worker_backend=args.worker_backend,
     )
+    outputs = write_profile_pngs(profiles, args.out_prefix)
+    tsv_fname = write_profile_tsv(profiles, f"{args.out_prefix}.tsv")
     print(f"Wrote plus-strand metaplot: {outputs['+']}")
     print(f"Wrote minus-strand metaplot: {outputs['-']}")
+    print(f"Wrote metaplot profiles: {tsv_fname}")

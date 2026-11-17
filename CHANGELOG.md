@@ -13,9 +13,18 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   ([#4](https://github.com/adamyhe/kackle/pull/4)).
 - `figwig[fast]` extra, which adds the libdeflate compressor for bigWig
   writing ([#4](https://github.com/adamyhe/kackle/pull/4)).
+- `kackle-metaplot -w/--chrom-workers` and `--worker-backend`, and a
+  `PREFIX.tsv` of the plotted values next to the PNGs.
 
 ### Changed
 
+- **`kackle-metaplot` runs at genome scale.** It now works one chromosome at
+  a time: sites are located per chromosome (in parallel), each track is read
+  densely once, and the profile is summed over the track's nonzero bases
+  instead of reading a 101-base window per site. No genome-wide site table is
+  built. Output is unchanged (matches the windowed implementation to
+  floating-point rounding). On hg38 chr21 (3M sites) it took 58 s and 2 GB,
+  where 0.2.0 took 40–60 minutes per whole-genome plot.
 - **bigWig I/O uses figwig instead of pybigtools**
   ([#4](https://github.com/adamyhe/kackle/pull/4)). figwig's reader threads are
   capped at the per-worker numba thread count. `write_bigwig` writes one chromosome at a

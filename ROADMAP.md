@@ -59,26 +59,12 @@ itself was negligible.
    `motif_anchor_arrays`, and reads `chrom`/`name` with the pandas `string`
    dtype. Group once and read `chrom` as a category.
 
-6. **`kackle-metaplot` is too slow for whole genomes.** On hg38 there are
-   about 100M TGG/TGGAA sites per strand. In 0.2.0 each plot took 40–60
-   minutes (per-site Python loop with two bigWig reads per site). Batched
-   reads (#4) bound memory, but three costs remain: motif location (about 33
-   CPU-minutes for hg38) is repeated on every invocation, the whole-genome
-   motif BED table is materialized, and every site still gets a 101-base read.
-   A standalone prototype that fixes all three matched `metaplot_profile` to
-   float32 rounding. On hg38 it located sites in 4 minutes (16 processes) and
-   plotted 6 samples x 6 tracks in about 40 minutes:
-   - stream sites one chromosome at a time, with chromosomes in parallel;
-   - read each track densely once per chromosome, and sum over its *nonzero*
-     bases against a per-base site-count vector,
-     `sum_i sig[c_i + k] = sum_{p: sig[p] != 0} sig[p] * n_sites[p - k]`.
-     PRO-seq signal is sparse (about 12M covered bases genome-wide), so this
-     costs O(nnz × width) instead of O(sites × width);
-   - optionally cache sites (they depend only on the genome and motif specs),
-     overlay several "after" tracks in one figure, and plot each motif spec
-     separately instead of pooling them.
-
-   Avoid genome-scale `kackle-metaplot` runs until this lands.
+6. **`kackle-metaplot` site caching and multi-track plots.** Genome-scale
+   streaming has landed, but every invocation still locates motifs from
+   scratch (about 33 CPU-minutes for hg38). Sites depend only on the genome
+   and motif specs, so they could be cached and reused across samples. Plots
+   could also overlay several "after" tracks and show each motif spec
+   separately instead of pooling them.
 
 ## Open questions
 

@@ -68,7 +68,11 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
 - `correction.py` — the `kmer_resample()` pipeline and the `kackle` CLI entry point
   (`run_correction`).
 - `plotting.py` — before/after metaplot generation and the `kackle-metaplot` CLI entry point
-  (`run_metaplot`).
+  (`run_metaplot`). The CLI path (`metaplot_profiles` → `chrom_window_sums`) works one
+  chromosome at a time: it locates sites per chromosome inside the workers, reads each track
+  densely once, and sums `sig[p] * n_sites[p - k]` over the track's *nonzero* bases instead of
+  reading a window per site. It never builds a genome-wide site table. `metaplot_profile` (windowed
+  reads, batched) is kept as the reference implementation the tests compare against.
 
 ### Correction pipeline (`kmer_resample()` in `correction.py`)
 
