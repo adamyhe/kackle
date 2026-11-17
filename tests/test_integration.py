@@ -1,9 +1,8 @@
 import sys
 
 import pandas as pd
-import pybigtools
 
-from kackle.bigwig import write_bigwig
+from kackle.bigwig import bigwig_chrom_sizes, read_chrom_values, write_bigwig
 from kackle.correction import run_correction
 
 
@@ -13,19 +12,13 @@ def write_text(path, text):
 
 
 def read_values(path, chrom, length):
-    bw = pybigtools.open(path)
-    try:
-        return bw.values(chrom, 0, length, fillna=0.0).tolist()
-    finally:
-        bw.close()
+    values = read_chrom_values(path, chrom)
+    assert len(values) == length
+    return values.tolist()
 
 
 def read_chroms(path):
-    bw = pybigtools.open(path)
-    try:
-        return bw.chroms()
-    finally:
-        bw.close()
+    return bigwig_chrom_sizes(path)
 
 
 def test_cli_fasta_mode_generates_motifs_and_writes_bigwigs(tmp_path, monkeypatch):

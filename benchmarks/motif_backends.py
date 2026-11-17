@@ -1,8 +1,8 @@
-"""Benchmark FASTA and motif matching backends.
+"""Benchmark motif matching backends.
 
 The benchmark creates a synthetic multi-record FASTA, locates the default
 kackle motifs on the last chromosome, and compares the pure-Python scanner
-against the default ``pyfastx`` and ``ahocorasick-rs`` backends.
+against the default ``ahocorasick-rs`` matcher (both read FASTA via pyfaidx).
 """
 
 from __future__ import annotations
@@ -36,13 +36,12 @@ def write_fasta(path: Path, records: int, length: int) -> None:
                 handle.write(b"\n")
 
 
-def time_provider(fasta, chrom, fasta_backend, match_backend, repeats):
+def time_provider(fasta, chrom, match_backend, repeats):
     """Return median runtime and hit counts for one backend combination."""
     provider = FastaMotifSiteProvider(
         fasta,
         MOTIFS,
         both_strands=True,
-        fasta_backend=fasta_backend,
         match_backend=match_backend,
     )
     timings = []
@@ -56,7 +55,7 @@ def time_provider(fasta, chrom, fasta_backend, match_backend, repeats):
             counts = current_counts
         elif counts != current_counts:
             raise RuntimeError(
-                f"Backend {fasta_backend}/{match_backend} produced inconsistent counts"
+                f"Backend {match_backend} produced inconsistent counts"
             )
     return statistics.median(timings), counts
 
@@ -73,27 +72,16 @@ def main() -> None:
         fasta = Path(tmpdir) / "synthetic.fa"
         write_fasta(fasta, args.records, args.length)
         chrom = f"chr{args.records}"
-        combinations = [
-            ("pyfastx", "ahocorasick"),
-            ("python", "python"),
-            ("python", "ahocorasick"),
-            ("pyfastx", "python"),
-        ]
         results = []
-        for fasta_backend, match_backend in combinations:
-            elapsed, counts = time_provider(
-                fasta, chrom, fasta_backend, match_backend, args.repeats
-            )
-            results.append((fasta_backend, match_backend, elapsed, counts))
+        for match_backend in ("ahocorasick", "python"):
+            elapsed, counts = time_provider(fasta, chrom, match_backend, args.repeats)
+            results.append((match_backend, elapsed, counts))
 
-    default_time = results[0][2]
-    print("fasta_backend\tmatch_backend\tseconds\tvs_default\thits")
-    for fasta_backend, match_backend, elapsed, counts in results:
+    default_time = results[0][1]
+    print("match_backend\tseconds\tvs_default\thits")
+    for match_backend, elapsed, counts in results:
         relative = default_time / elapsed
-        print(
-            f"{fasta_backend}\t{match_backend}\t"
-            f"{elapsed:.6f}\t{relative:.2f}x\t{counts}"
-        )
+        print(f"{match_backend}\t{elapsed:.6f}\t{relative:.2f}x\t{counts}")
 
 
 if __name__ == "__main__":
