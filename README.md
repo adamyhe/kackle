@@ -82,8 +82,9 @@ kackle-metaplot \
 This writes `correction.metaplot.plus.png`, `correction.metaplot.minus.png`, and
 the plotted values as `correction.metaplot.tsv`. BED6 motif sites can be
 supplied with `-b sites.bed6` instead of FASTA. Chromosomes are processed in
-parallel (`-w/--chrom-workers`, default `auto` = up to 4); each worker holds
-about 4–5 GB for a 250 Mb chromosome.
+parallel (`-w/--chrom-workers`, default `auto` = up to 4). In FASTA mode on
+hg38, each worker peaks at about 11 GB (chr1), and a whole-genome plot takes
+about 12 minutes with 4 workers or 5.5 minutes with 8.
 
 ## Benchmarking
 

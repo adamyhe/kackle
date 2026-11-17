@@ -23,8 +23,9 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   densely once, and the profile is summed over the track's nonzero bases
   instead of reading a 101-base window per site. No genome-wide site table is
   built. Output is unchanged (matches the windowed implementation to
-  floating-point rounding). On hg38 chr21 (3M sites) it took 58 s and 2 GB,
-  where 0.2.0 took 40–60 minutes per whole-genome plot.
+  floating-point rounding). A whole-genome hg38 plot (about 230M sites per
+  strand, pooled over both motifs) takes 12 minutes with 4 workers or 5.5
+  minutes with 8, with about 11 GB peak per worker. 0.2.0 took 40–60 minutes.
 - **bigWig I/O uses figwig instead of pybigtools**
   ([#4](https://github.com/adamyhe/kackle/pull/4)). figwig's reader threads are
   capped at the per-worker numba thread count. `write_bigwig` writes one chromosome at a
