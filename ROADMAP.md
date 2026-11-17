@@ -48,6 +48,8 @@ itself was negligible.
    (6.1 s) dwarf the Aho-Corasick scan (3.6 s). Return NumPy anchor arrays and
    build BED tables only for `--out-bed6-prefix`. A numba Hamming-match kernel
    over the sequence bytes could replace the variant expansion entirely.
+   `kackle-metaplot` needs only start arrays too, so this is also the main
+   remaining metaplot cost (see item 6).
 3. **Per-base output DataFrames** (not measured separately). Each chromosome
    becomes one row per nonzero base with an object `chrom` column, concatenated
    genome-wide before writing and pickled back to the parent in process mode.
@@ -59,12 +61,35 @@ itself was negligible.
    `motif_anchor_arrays`, and reads `chrom`/`name` with the pandas `string`
    dtype. Group once and read `chrom` as a category.
 
-6. **`kackle-metaplot` site caching and multi-track plots.** Genome-scale
-   streaming has landed, but every invocation still locates motifs from
-   scratch (about 33 CPU-minutes for hg38). Sites depend only on the genome
-   and motif specs, so they could be cached and reused across samples. Plots
-   could also overlay several "after" tracks and show each motif spec
-   separately instead of pooling them.
+6. **`kackle-metaplot` after genome-scale streaming.** Measured on hg38 in
+   FASTA mode, one sample (about 115M sites per strand): 12:03 with `-w 4`
+   and 5:25 with `-w 8`, peaking at 11.2 GB per worker. On chr21 alone
+   (58 s), motif location was about half the runtime. The whole-genome run
+   hasn't been profiled by stage, so **profile chr1 before changing
+   anything**, to confirm where the time and the 11 GB actually go. In
+   likely order of payoff:
+   1. **Return start arrays from motif location** (item 2). Each worker
+      builds a sorted pandas BED6 table for its chromosome, with object
+      string columns (about 18M hits on chr1), only to pull out `start` per
+      strand. That is probably most of the per-worker peak memory as well as
+      of the location time (unconfirmed). This also speeds up `kackle`.
+   2. **Cache sites across invocations.** Sites depend only on the genome
+      and motif specs, but every plot repeats location (about 33 CPU-minutes
+      for hg38). A per-chromosome `.npz` cache keyed by FASTA and motif specs
+      would leave later plots, e.g. one per sample, with only reading and
+      summing. A standalone prototype that did this located hg38 sites in
+      4 minutes with 16 processes and reused them across 6 samples.
+   3. **Split large chromosomes across workers.** At `-w 8` the run is
+      bounded by chr1. Splitting a chromosome into chunks (with `flank`
+      bases of overlap, assigning each site to the chunk that holds it)
+      would let more workers help, but only pays off beyond about 8
+      workers.
+   4. **A numba kernel for the sparse sum.** `chrom_window_sums` does
+      `2 * flank + 1` NumPy gathers over each track's nonzero bases. A fused
+      numba loop would be faster but is a small share of the runtime now.
+   5. **Plot features** (not performance): overlay several "after" tracks
+      in one figure, and show each motif spec separately instead of pooling
+      them.
 
 ## Open questions
 
