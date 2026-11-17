@@ -201,6 +201,56 @@ def correct_kmers(
     return out_vec
 
 
+@njit(parallel=True, cache=True)
+def correct_artifact_bases(
+    chromosome_signal_vector: np.array,
+    starts: np.array,
+    source: np.uint = 10,
+    threshold: np.uint = 10,
+    strand: str = "+",
+) -> np.array:
+    """Redraw only the artifact base of each flagged site.
+
+    Screening is the same as in ``correct_kmers``. For each flagged anchor,
+    the strand-appropriate artifact base (plus: ``anchor - 1``; minus:
+    ``anchor``) is replaced with a Poisson draw whose mean is the mean of the
+    rest of its ``[anchor - source, anchor + source)`` neighborhood, leaving
+    out the artifact bases of other flagged sites. Every other base keeps
+    its input value, so natural structure around the motif is untouched.
+    Each flagged site writes only its own artifact base and reads only the
+    input vector, so the parallel loop has no races.
+    """
+    out_vec = chromosome_signal_vector.copy()
+    if starts.shape[0] == 0:
+        return out_vec
+    flagged = artifact_mask_parallel(
+        chromosome_signal_vector, starts, source, threshold, strand
+    )
+    offset = 1 if strand == "+" else 0
+    art = np.sort(starts[flagged].astype(np.int64)) - offset
+    n = art.shape[0]
+    for i in prange(n):
+        idx = art[i]
+        anchor = idx + offset
+        lo = anchor - source
+        hi = anchor + source
+        total = 0
+        count = 0
+        k_lo = np.searchsorted(art, lo)
+        k = k_lo
+        for j in range(lo, hi):
+            # Skip this and other flagged sites' artifact bases.
+            while k < n and art[k] < j:
+                k += 1
+            if k < n and art[k] == j:
+                continue
+            total += chromosome_signal_vector[j]
+            count += 1
+        mean = total / count if count > 0 else 0.0
+        out_vec[idx] = np.random.poisson(mean)
+    return out_vec
+
+
 # ---------------------------------------------------------------------------
 # Motif matching
 # ---------------------------------------------------------------------------

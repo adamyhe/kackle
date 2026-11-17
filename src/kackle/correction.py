@@ -26,7 +26,7 @@ from kackle.cli_common import (
     read_bed6,
     read_chrom_sizes,
 )
-from kackle.computation import correct_kmers
+from kackle.computation import correct_artifact_bases, correct_kmers
 from kackle.motifs import FastaMotifSiteProvider
 from kackle.motifs import fasta_chrom_names
 from kackle.motifs import parse_motif_spec
@@ -225,6 +225,7 @@ def _correct_strand_signal(
     n_jobs,
     start=0,
     end=None,
+    resample="window",
 ):
     """Read, correct and sparsify one strand of a chromosome or of ``[start, end)``.
 
@@ -242,7 +243,10 @@ def _correct_strand_signal(
     for starts in anchor_arrays:
         if starts.shape[0] == 0:
             continue
-        values = correct_kmers(values, starts, source, target, threshold, strand)
+        if resample == "base":
+            values = correct_artifact_bases(values, starts, source, threshold, strand)
+        else:
+            values = correct_kmers(values, starts, source, target, threshold, strand)
     positions = np.flatnonzero(values > 0).astype(np.int32)
     return positions, values[positions]
 
@@ -346,6 +350,7 @@ def _correct_region_both_strands(
     isolate_fasta_provider=False,
     numba_threads=None,
     keep_sites=False,
+    resample="window",
 ):
     """Correct both strands of one chromosome region, one strand at a time.
 
@@ -394,6 +399,7 @@ def _correct_region_both_strands(
             n_jobs,
             start=start,
             end=end,
+            resample=resample,
         )
         if start:
             positions += start
@@ -698,6 +704,7 @@ def correct_bigwigs(
     write_jobs=None,
     chunk_size=DEFAULT_CHUNK_SIZE,
     verbose=True,
+    resample="window",
 ):
     """Correct both strands in one pass and stream them to bigWigs.
 
@@ -723,6 +730,10 @@ def correct_bigwigs(
         other providers get whole chromosomes.
     source, target, threshold : int
         Parameters forwarded to ``correct_kmers``.
+    resample : {"window", "base"}
+        ``"window"`` resamples whole target windows (``correct_kmers``);
+        ``"base"`` redraws only each flagged site's artifact base
+        (``correct_artifact_bases``; experimental, ignores ``target``).
     chrom_workers, worker_backend, numba_threads, verbose
         As in :func:`kmer_resample`.
     write_jobs : int, optional
@@ -786,6 +797,7 @@ def correct_bigwigs(
                 parallel,
                 numba_threads,
                 keep_sites,
+                resample,
             )
         last_region[chrom] = regions[-1]
         del chrom_anchors
@@ -992,6 +1004,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--resample",
+        choices=("window", "base"),
+        default="window",
+        help=(
+            "What to redraw at a flagged site: 'window' (default) resamples the "
+            "whole target window from the flanks; 'base' (experimental) redraws "
+            "only the artifact base from its local mean."
+        ),
+    )
+    parser.add_argument(
         "-w",
         "--chrom-workers",
         metavar="N|auto",
@@ -1112,4 +1134,5 @@ def run_correction():
         write_jobs=thread_budget(),
         chunk_size=args.chunk_size,
         verbose=args.verbose,
+        resample=args.resample,
     )
