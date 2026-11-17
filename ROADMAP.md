@@ -57,6 +57,16 @@ on the plus strand) raised to about 1.0 after correction, in every version.
 Resampling only the artifact base, or preserving the window's shape, would
 change every corrected site's output.
 
+The dips themselves are real: the raw input shows the same depletion at the
+G bases of AGG, CGG and GGG, which carry no artifact. A base-only prototype
+(`--resample base`, branch `base-resample`) redraws just the artifact base
+with a Poisson draw from its neighborhood mean. On the 6 samples it changed
+nothing outside artifact bases. It kept the motif dip (TGG offset +1: input
+0.13, window mode 0.33, base only 0.18 of the flank). The artifact-base ratio
+stayed close to window mode (TGG 0.91–1.05 vs 0.92–1.06; TGGAA:1 0.80–0.89 vs
+0.82–0.92). It removed about 1% more of the total signal, mostly reads that
+window mode adds back into the dip.
+
 ### Resampled total isn't density-preserving when `source - target != target`
 
 Each flagged span is redrawn with a total equal to its flank sum, scaled by
@@ -66,6 +76,48 @@ when `source = 2 * target`, as with the defaults (10 and 5). With `-s 20 -t 5`,
 for example, a corrected window gets three times the local density. Scaling by
 `span_width / flank_width` instead would fix this, but it would change output
 for every non-default `source`/`target` setting.
+
+## Planned
+
+### Adapter-based, single-pass site search
+
+The artifact is primer mispriming on 3' adapter look-alikes inside real
+fragments. Reads end at the base just before a stretch of genome that
+resembles the adapter's 5' end (`TGGAATTCTCGG` for the TruSeq small-RNA
+adapter). On the 6 samples, the raw spike grows with how much of the adapter
+matches:
+
+| match | raw spike |
+|---|---|
+| TGG, then off-adapter | 3.3× |
+| TGGA | 14× |
+| TGGAA | 73× |
+| TGGAAT | 232× |
+| 8–12 adapter bases | 560–1350× |
+
+A mismatch inside TGG is tolerated when the rest matches: one mismatch at the
+T followed by 7 more adapter bases gives 40×. Of the 16 TGGAA:1 variants, four
+(TCGAA, GGGAA, TGGTA, TGGCA) carry almost no artifact. After the TGG pass,
+most of what remains is below the 10× threshold: TGGA–TGGAATT sites sit at
+1.6–2.4× their flanks with only about 0.15% flagged.
+
+The plan is to take an adapter sequence and derive the sites from it:
+
+- `--adapter SEQ` (IUPAC codes allowed, so UMI `N`s act as wildcards). A
+  candidate is a position whose RNA-sense sequence matches the adapter's 5'
+  end for a minimum length with at most a set number of mismatches.
+- A threshold graded by match length, since a long match is almost certainly
+  an artifact.
+- One pass. With base-only resampling, a second pass mostly cleans up the
+  screen's background, so instead the background leaves out every
+  candidate's artifact base. That makes it deterministic and independent of
+  order.
+- `-k` / `-b` multi-pass stay for other artifact types.
+
+Later: calibrate the tiers per library from the input itself, and report
+artifact signal by match class. The artifact base sits just before the
+look-alike in RNA orientation, which holds for 3'-end tracks like these;
+other library layouts would need an option for which side the adapter is on.
 
 ## Performance
 
