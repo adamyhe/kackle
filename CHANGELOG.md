@@ -18,6 +18,15 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
 
 ### Changed
 
+- **Large chromosomes are split across workers** (`--chunk-size`, default
+  10 Mb, in `kackle` and `kackle-metaplot`; `0` turns it off). `kackle` cuts
+  only where no anchor of any motif pass or strand lies within
+  `max(source, target)` bases, so chunks never interact and the output is the
+  same as for whole chromosomes. Each chunk locates its own sites and reads
+  only its own signal. On hg38 (PROseq_2), peak memory per process fell from
+  2.1–4.2 GB to about 0.8 GB for `kackle`, and from 1.8 to 0.23 GB for
+  `kackle-metaplot`, whose 16-worker run now takes 25 s instead of 51.
+  `FastaMotifSiteProvider` gains `starts_for_region`.
 - **`kackle` corrects both strands in one pass and streams the output.** Each
   chromosome task locates its motif sites for both strands once, then
   corrects plus and minus in turn, and each finished chromosome is written to
