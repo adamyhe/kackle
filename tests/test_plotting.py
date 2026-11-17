@@ -414,3 +414,37 @@ def test_metaplot_profiles_fasta_provider_matches_bed_sites(tmp_path):
 def test_metaplot_profiles_requires_exactly_one_site_source():
     with pytest.raises(ValueError):
         metaplot_profiles({}, [], 5)
+
+
+def test_chrom_window_sums_does_not_modify_inputs():
+    before = np.array([-1.0, -2.0, np.nan, -4.0, 0.0, -6.0])
+    after = before.copy()
+    snapshot = before.copy()
+    chrom_window_sums(before, after, [2, 3], flank=1, absolute=True)
+    np.testing.assert_array_equal(before, snapshot)
+    np.testing.assert_array_equal(after, snapshot)
+
+
+@pytest.mark.parametrize("duplicates,dtype", [(3, np.uint8), (300, np.uint16)])
+def test_site_count_vector_widens_dtype_for_many_duplicates(duplicates, dtype):
+    from kackle.plotting import _site_count_vector
+
+    centers = np.array([5] * duplicates + [9], dtype=np.int64)
+    site_count = _site_count_vector(centers, length=20, flank=2)
+    assert site_count.dtype == dtype
+    assert site_count[5 + 2] == duplicates and site_count[9 + 2] == 1
+
+    values = np.arange(20, dtype=np.float64)
+    before_sum, _, counts = chrom_window_sums(values, values, centers, flank=2)
+    want = _reference_sums(values, values, centers, 2, False)
+    np.testing.assert_allclose(before_sum, want[0])
+    np.testing.assert_array_equal(counts, want[2])
+
+
+def test_dense_signal_in_place_handles_abs_and_non_finite():
+    from kackle.plotting import _dense_signal
+
+    values = np.array([-1.0, np.inf, -3.0, np.nan, 5.0], dtype=np.float32)
+    out = _dense_signal(values, 4, absolute=True, in_place=True)
+    assert np.shares_memory(out, values)
+    assert out.tolist() == [1.0, 0.0, 3.0, 0.0]
