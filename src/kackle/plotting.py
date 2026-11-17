@@ -65,7 +65,12 @@ def _read_centered_windows(bw, chroms, centers, flank):
     return values.astype(np.float64)
 
 
-def metaplot_profile(before_bw, after_bw, sites, flank, absolute=False):
+METAPLOT_BATCH_SITES = 100_000
+
+
+def metaplot_profile(
+    before_bw, after_bw, sites, flank, absolute=False, batch_size=METAPLOT_BATCH_SITES
+):
     """Return mean before/after signal centered on motif starts.
 
     Parameters
@@ -81,7 +86,13 @@ def metaplot_profile(before_bw, after_bw, sites, flank, absolute=False):
     absolute : bool
         Whether to aggregate absolute signal values. This is useful for
         negative-strand bigWigs whose input values are negative.
+    batch_size : int
+        Sites read per batch. Each batch holds a few ``(batch_size, 2 * flank
+        + 1)`` arrays, so memory stays bounded for genome-wide site sets
+        (~100M TGG sites per strand on hg38) at the cost of more read calls.
     """
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
     width = flank * 2 + 1
     x = np.arange(-flank, flank + 1)
     available = set(before_bw.chrom_sizes).intersection(after_bw.chrom_sizes)
@@ -90,18 +101,20 @@ def metaplot_profile(before_bw, after_bw, sites, flank, absolute=False):
     before_sum = np.zeros(width, dtype=np.float64)
     after_sum = np.zeros(width, dtype=np.float64)
     counts = np.zeros(width, dtype=np.int64)
-    if len(sites):
-        chroms = sites["chrom"].to_numpy(dtype=object).astype(str)
-        centers = sites["start"].to_numpy(dtype=np.int64)
+    all_chroms = sites["chrom"].to_numpy(dtype=object)
+    all_centers = sites["start"].to_numpy(dtype=np.int64)
+    for lo in range(0, len(all_centers), batch_size):
+        chroms = all_chroms[lo : lo + batch_size].astype(str)
+        centers = all_centers[lo : lo + batch_size]
         before_values = _read_centered_windows(before_bw, chroms, centers, flank)
         after_values = _read_centered_windows(after_bw, chroms, centers, flank)
         if absolute:
             before_values = np.abs(before_values)
             after_values = np.abs(after_values)
         valid = np.isfinite(before_values) & np.isfinite(after_values)
-        before_sum = np.where(valid, before_values, 0.0).sum(axis=0)
-        after_sum = np.where(valid, after_values, 0.0).sum(axis=0)
-        counts = valid.sum(axis=0).astype(np.int64)
+        before_sum += np.where(valid, before_values, 0.0).sum(axis=0)
+        after_sum += np.where(valid, after_values, 0.0).sum(axis=0)
+        counts += valid.sum(axis=0)
 
     before_mean = np.full(width, np.nan, dtype=np.float64)
     after_mean = np.full(width, np.nan, dtype=np.float64)

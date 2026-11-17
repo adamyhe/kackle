@@ -40,6 +40,60 @@ def test_metaplot_profile_averages_windows_centered_on_motif_start():
     assert counts.tolist() == [1, 2, 2]
 
 
+class RecordingBigWig(FakeBigWig):
+    """FakeBigWig that records how many windows each read call asked for."""
+
+    def __init__(self, values):
+        super().__init__(values)
+        self.read_rows = []
+
+    def read(self, chroms, starts, width, missing=0.0, oob=np.nan):
+        self.read_rows.append(len(starts))
+        return super().read(chroms, starts, width, missing=missing, oob=oob)
+
+
+@pytest.mark.parametrize("batch_size", [1, 3, 7, 50, 10_000])
+def test_metaplot_profile_batches_match_single_batch(batch_size):
+    rng = np.random.default_rng(0)
+    length = 200
+    before_values = rng.integers(-5, 20, length).astype(np.float64)
+    after_values = rng.integers(0, 5, length).astype(np.float64)
+    # Include windows that run off both chromosome ends.
+    starts = np.concatenate([[0, 1, length - 1, length - 2], rng.integers(0, length, 40)])
+    sites = pd.DataFrame({"chrom": "chr1", "start": starts})
+
+    reference = metaplot_profile(
+        FakeBigWig(before_values), FakeBigWig(after_values), sites, flank=5,
+        absolute=True, batch_size=len(sites),
+    )
+    before_bw = RecordingBigWig(before_values)
+    batched = metaplot_profile(
+        before_bw, FakeBigWig(after_values), sites, flank=5,
+        absolute=True, batch_size=batch_size,
+    )
+
+    for ref, got in zip(reference, batched):
+        np.testing.assert_array_equal(ref, got)
+    assert max(before_bw.read_rows) <= batch_size
+    assert sum(before_bw.read_rows) == len(sites)
+
+
+def test_metaplot_profile_with_no_sites_returns_nan_means():
+    sites = pd.DataFrame({"chrom": pd.Series([], dtype=str), "start": pd.Series([], dtype=int)})
+    _, before_mean, after_mean, counts = metaplot_profile(
+        FakeBigWig([1, 2, 3]), FakeBigWig([1, 2, 3]), sites, flank=1
+    )
+    assert np.isnan(before_mean).all() and np.isnan(after_mean).all()
+    assert counts.tolist() == [0, 0, 0]
+
+
+def test_metaplot_profile_rejects_nonpositive_batch_size():
+    sites = pd.DataFrame({"chrom": ["chr1"], "start": [1]})
+    with pytest.raises(ValueError):
+        metaplot_profile(FakeBigWig([1, 2, 3]), FakeBigWig([1, 2, 3]), sites, flank=1,
+                         batch_size=0)
+
+
 def test_metaplot_profile_can_use_absolute_signal_for_minus_strand():
     before = FakeBigWig([-1, -2, -3])
     after = FakeBigWig([1, 4, 9])
