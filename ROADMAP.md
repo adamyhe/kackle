@@ -71,29 +71,45 @@ Memory is the largest single process. The harness numbers include its own
 logging of every anchor array. `-w 8` barely helps: the run is bounded by
 chr1.
 
+**Done: large chromosomes split across workers** (`--chunk-size`, default
+10 Mb; hg38 becomes 322 chunks). Cuts avoid every anchor by
+`max(source, target)`, so chunked output is identical to whole-chromosome
+output: byte-identical genome-wide with a deterministic stand-in for the
+resampler. On hg38 (PROseq_2), same node, process backend:
+
+| | main | chunked |
+|---|---|---|
+| `kackle -w 4` | 45.6 s, 4.2 GB | 29.6 s, 0.78 GB |
+| `kackle -w 8` | 22.0 s, 2.1 GB | 20.0 s, 0.79 GB |
+| `kackle -w 16` | 21.9 s, 2.2 GB | 17.3 s, 0.81 GB |
+| `kackle-metaplot -w 8` | 50.8 s, 1.8 GB | 50.5 s, 0.23 GB |
+| `kackle-metaplot -w 16` | | 24.7 s, 0.22 GB |
+
+Chunk sizes of 5–25 Mb at `-w 8` were within noise (18.9–20.8 s). Main's
+`-w 4` time varies between nodes (29.9 s in the #9 job). `kackle` now
+levels off around 17–20 s, which is likely fixed costs: spawning workers,
+cut planning in the parent, and writing.
+
 Remaining, roughly in order of payoff:
 
-1. **Split large chromosomes across workers** (for `kackle` and
-   `kackle-metaplot`). Both are now bounded by chr1. Chunks need `source +
-   target` bases of overlap for `kackle` (more if clusters span the
-   boundary) and `flank` bases for `kackle-metaplot`.
-2. **Dense per-chromosome arrays.** Each strand is read as a dense float64
-   array and converted to int32 (about 3 GB transient on chr1). Reading as
+1. **Profile the remaining `kackle` floor** (about 17 s at `-w 16`) before
+   optimizing further: worker start-up, cut planning, bigWig reading and
+   writing.
+2. **Dense float64 reads.** Each chunk's strand is read as a dense float64
+   array and converted to int32 (about 120 MB per 10 Mb chunk). Reading as
    int32 directly, or reading covered intervals, would cut the per-worker
    peak.
 3. **BED6 mode reads `chrom`/`name` with the pandas `string` dtype.** The BED
    is now grouped once (`bed_anchor_index`); reading `chrom` as a category
    would also shrink the loaded table.
 4. **`kackle-metaplot`:**
-   - **Split large chromosomes across workers** (item 1); assign each site
-     to the chunk that holds it.
    - **A numba kernel for the sparse sum.** `chrom_window_sums` does
      `2 * flank + 1` NumPy gathers over each track's nonzero bases; a fused
      loop would be faster.
    - **Read covered intervals instead of dense chromosomes.** Each track is
-     read as a dense float array (about 1 GB on chr1), but PRO-seq covers
+     read as a dense float array (about 80 MB per 10 Mb chunk), but PRO-seq covers
      only a few percent of bases. Depends on whether figwig can return
-     intervals (not yet checked). This is now most of the metaplot peak.
+     intervals (not yet checked).
    - Caching sites across invocations is no longer worth it: locating all
      hg38 sites takes about 40 CPU-seconds.
 

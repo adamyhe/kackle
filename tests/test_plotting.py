@@ -448,3 +448,47 @@ def test_dense_signal_in_place_handles_abs_and_non_finite():
     out = _dense_signal(values, 4, absolute=True, in_place=True)
     assert np.shares_memory(out, values)
     assert out.tolist() == [1.0, 0.0, 3.0, 0.0]
+
+
+@pytest.mark.parametrize("mode", ["bed", "fasta"])
+@pytest.mark.parametrize("chunk_size", [37, 100, 1000])
+@pytest.mark.parametrize("chrom_workers,backend", [(1, "thread"), (3, "thread"), (2, "process")])
+def test_metaplot_chunks_match_whole_chromosomes(
+    tmp_path, mode, chunk_size, chrom_workers, backend
+):
+    rng = np.random.default_rng(5)
+    chrom_sizes = [("chr1", 400), ("chr2", 250)]
+    before, _ = _write_stranded_pair(tmp_path, "before", chrom_sizes, rng)
+    # The after tracks are shorter on chr1, so windows clip at min(length).
+    after, _ = _write_stranded_pair(tmp_path, "after", [("chr1", 380), ("chr2", 250)], rng)
+    bigwigs = {"+": (str(before["+"]), str(after["+"])), "-": (str(before["-"]), str(after["-"]))}
+    chroms = ["chr1", "chr2"]
+    if mode == "bed":
+        rows = [
+            (chrom, int(start), int(start) + 3, "m", 0, strand)
+            for chrom, size in chrom_sizes
+            for strand in "+-"
+            # including sites just off each end, and exact duplicates
+            for start in list(rng.integers(-12, size + 12, 60)) + [0, 0, size - 1]
+        ]
+        bed = pd.DataFrame(rows, columns=["chrom", "start", "end", "name", "score", "strand"])
+        site_args = {"sites": sites_by_chrom(bed)}
+    else:
+        fasta = tmp_path / "genome.fa"
+        fasta.write_text(
+            "".join(f">{c}\n{''.join(rng.choice(list('ACGTTGG'), n))}\n" for c, n in chrom_sizes)
+        )
+        site_args = {"provider": FastaMotifSiteProvider(fasta, ["TGG:0", "TGGAA:1"])}
+
+    whole = metaplot_profiles(bigwigs, chroms, 10, chunk_size=0, **site_args)
+    chunked = metaplot_profiles(
+        bigwigs, chroms, 10, chunk_size=chunk_size, chrom_workers=chrom_workers,
+        worker_backend=backend, **site_args,
+    )
+    for strand in "+-":
+        x, before_mean, after_mean, counts = whole[strand]
+        np.testing.assert_array_equal(chunked[strand][0], x)
+        np.testing.assert_array_equal(chunked[strand][3], counts)
+        np.testing.assert_allclose(chunked[strand][1], before_mean, rtol=1e-12)
+        np.testing.assert_allclose(chunked[strand][2], after_mean, rtol=1e-12)
+        assert counts.min() > 0

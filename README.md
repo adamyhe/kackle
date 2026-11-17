@@ -65,6 +65,13 @@ interpreters. Set `--worker-backend thread` for lower process overhead, set
 `--chrom-workers 1` for serial chromosome processing, or tune
 `--numba-threads N` explicitly.
 
+Chromosomes longer than `--chunk-size` (default 10 Mb) are split into chunks
+that are corrected in parallel, so large chromosomes no longer bound the run.
+Cuts are placed only where no motif site's window reaches across them, so the
+output is the same as correcting whole chromosomes. `--chunk-size 0` turns
+splitting off. On hg38, a run takes about 20–30 seconds with 4–16 workers and
+under 1 GB per process.
+
 kackle processes chromosomes present in the intersection of `chrom.sizes`, both
 input bigWigs, and the FASTA file when FASTA mode is used. Chromosomes absent
 from any required source are skipped.
@@ -81,9 +88,10 @@ kackle-metaplot \
 This writes `correction.metaplot.plus.png`, `correction.metaplot.minus.png`, and
 the plotted values as `correction.metaplot.tsv`. BED6 motif sites can be
 supplied with `-b sites.bed6` instead of FASTA. Chromosomes are processed in
-parallel (`-w/--chrom-workers`, default `auto` = up to 4). In FASTA mode on
-hg38, each worker peaks at about 7 GB (chr1), and a whole-genome plot takes
-about 8 minutes with 4 workers or 5 minutes with 8.
+parallel, in chunks of `--chunk-size` (default 10 Mb), with
+`-w/--chrom-workers` workers (default `auto` = up to 4). A whole-genome hg38 plot
+in FASTA mode takes about 50 seconds with 8 workers or 25 with 16, at about
+0.25 GB per process.
 
 ## Benchmarking
 

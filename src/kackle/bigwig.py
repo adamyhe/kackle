@@ -23,15 +23,17 @@ def bigwig_chrom_sizes(bw_fname):
     return dict(open_bigwig(bw_fname).chrom_sizes)
 
 
-def read_chrom_values(bw_fname, chrom, n_jobs=1):
-    """Return dense per-base values for an entire chromosome.
+def read_chrom_values(bw_fname, chrom, n_jobs=1, start=0, end=None):
+    """Return dense per-base values for a chromosome, or ``[start, end)`` of it.
 
-    Bases not covered by any interval are 0. Raises ``KeyError`` if the
-    chromosome is absent from the bigWig.
+    Bases not covered by any interval are 0. ``end`` defaults to the
+    chromosome's length. Raises ``KeyError`` if the chromosome is absent from
+    the bigWig.
     """
     bw = open_bigwig(bw_fname)
-    chrom_size = int(bw.chrom_sizes[chrom])
-    return bw.read([chrom], [0], chrom_size, n_jobs=n_jobs, missing=0.0)[0]
+    if end is None:
+        end = int(bw.chrom_sizes[chrom])
+    return bw.read([chrom], [int(start)], int(end) - int(start), n_jobs=n_jobs, missing=0.0)[0]
 
 
 def open_bigwig_writer(bw_fname, chrom_sizes, n_jobs=8):

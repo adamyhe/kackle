@@ -42,7 +42,9 @@ kackle-metaplot --before-pl-bw plus.bw --before-mn-bw minus.bw \
 Key CLI flags (`kackle`, see `parse_args()` in `correction.py`): `-s/--source` (background
 sampling half-window, default 10), `-t/--target` (correction half-window, default 5),
 `-r/--threshold` (fold-over-background cutoff to flag an artifact, default 10), `-w/--chrom-workers`
-(concurrent chromosomes, default `auto`), `--worker-backend` (`process` default, or `thread`),
+(concurrent chromosome chunks, default `auto`), `--chunk-size` (split chromosomes longer than this
+many bases, default 10 Mb; `0` = whole chromosomes; `kackle-metaplot` has it too),
+`--worker-backend` (`process` default, spawned, or `thread`),
 `--numba-threads` (default `auto`), `-k/--motif KMER[:MISMATCHES]` (repeatable, FASTA mode only,
 defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-mode motif sites),
 `-v/--verbose` (progress bars).
@@ -77,7 +79,9 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
   that returns a sparse DataFrame. Both share `_correct_strand_signal` and `_run_chromosomes`.
 - `plotting.py` — before/after metaplot generation and the `kackle-metaplot` CLI entry point
   (`run_metaplot`). The CLI path (`metaplot_profiles` → `chrom_window_sums`) works one
-  chromosome at a time: it locates sites per chromosome inside the workers, reads each track
+  chromosome, or `--chunk-size` chunk, at a time. A chunk owns the sites that start in it and
+  reads its tracks with `flank` bases of margin, so chunk sums add up exactly. It locates sites
+  per chunk inside the workers, reads each track
   densely once, and sums `sig[p] * n_sites[p - k]` over the track's *nonzero* bases instead of
   reading a window per site. It never builds a genome-wide site table. `metaplot_profile` (windowed
   reads, batched) is kept as the reference implementation the tests compare against.
@@ -86,7 +90,19 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
 
 One pass over chromosomes corrects both strands: each chromosome task locates (or looks up) its
 motif sites for both strands once, then corrects plus and minus **independently**, one after the
-other, so only one dense strand array is alive at a time. For each strand:
+other, so only one dense strand array is alive at a time.
+
+**Chunking.** Chromosomes longer than `chunk_size` are split by `plan_chunks()` at cuts with no
+anchor (any pass, either strand) within `reach = max(source, target)`. Every site reads and writes
+only `[anchor - reach, anchor + reach)`, and clusters link only below `source + target <= 2 *
+reach`, so a chunk's correction is exactly the restriction of the whole-chromosome correction (up to
+random draws). Each chunk task locates only its own sites (`starts_for_region`) or gets sliced BED
+anchors, reads only its own signal, and the parent reassembles chunks per chromosome before writing.
+Don't weaken the cut rule: `tests/test_chunking.py` checks chunked == whole byte for byte with a
+deterministic stand-in for the resampler. The comparison harness keys records on signal length, so
+it needs `--chunk-size 0`.
+
+For each strand (of each chunk):
 
 1. Resolve motif sites either from a precomputed BED6 (`read_bed6`, loaded once and grouped once
    into per-chromosome, per-strand anchor arrays by `bed_anchor_index()`) or from
@@ -135,8 +151,9 @@ silently skipped, not errored on.
 ### Parallelism knobs
 
 Two independent levels of parallelism interact and must not oversubscribe CPUs:
-- **Cross-chromosome**: `chrom_workers` (thread- or process-pool). `auto` resolves to
-  `min(chrom_count, thread_budget(), 4)`.
+- **Cross-chromosome**: `chrom_workers` (thread- or process-pool) over chromosome chunks.
+  `auto` resolves to `min(chrom_count, thread_budget(), 4)`. Process pools use the `spawn` context:
+  the parent holds figwig writer threads, and forking a multi-threaded process crashes workers.
 - **Within-chromosome (numba)**: `numba_threads`, set per worker via `numba.set_num_threads()`.
   `auto` divides `thread_budget()` (honors `NUMBA_NUM_THREADS` env var, else `os.cpu_count()`)
   across `chrom_workers` so the two levels don't multiply out past available CPUs.
