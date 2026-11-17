@@ -184,3 +184,6 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .claude/settings.local.json
+
+# Version comparison output (scripts/compare_versions)
+compare-out/

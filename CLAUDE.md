@@ -51,6 +51,11 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
 
 `uv run python benchmarks/motif_backends.py` reproduces FASTA motif-matching backend timings.
 
+`scripts/compare_versions/` compares two git refs' outputs on the same inputs (`compare.sh -a REF -b
+REF`, `-x` for exact mode: no JIT, RNG keyed per anchor, small inputs only); see its README. It's the
+main regression check for changes to the correction pipeline: anchors must match, nothing may change
+outside motif windows, and isolated windows must keep their sums.
+
 ## Architecture
 
 ### Module layout (`src/kackle/`)
