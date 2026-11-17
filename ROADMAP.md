@@ -55,24 +55,38 @@ identical sites and must-match checks passing:
 Metaplot memory is the largest single process. Metaplot TSVs are
 byte-identical to before.
 
+**Done: one pass over both strands, streamed output.** Each chromosome task
+locates sites for both strands once and corrects plus then minus; finished
+chromosomes go straight to both bigWigs in order, with no genome-wide per-base
+DataFrame. On hg38 (PROseq_2), with byte-identical bigWigs in exact mode
+(chr21 and chr22) and must-match checks passing genome-wide:
+
+| | before | after |
+|---|---|---|
+| `kackle -w 4` (process, default) | 38.6 s, 3.4 GB | 29.9 s, 2.1 GB |
+| `kackle -w 8` (process) | | 28.6 s, 2.1 GB |
+| harness, `-w 4` threads | 3:15, 10.4 GB | 2:51, 7.7 GB |
+
+Memory is the largest single process. The harness numbers include its own
+logging of every anchor array. `-w 8` barely helps: the run is bounded by
+chr1.
+
 Remaining, roughly in order of payoff:
 
-1. **Per-base output DataFrames.** Each chromosome becomes one row per
-   nonzero base with an object `chrom` column, concatenated genome-wide
-   before writing and pickled back to the parent in process mode. This is
-   now likely the bulk of `kackle`'s 10.4 GB peak (not yet profiled). Return
-   arrays, or stream each corrected chromosome straight to the writer.
-2. **Two full strand passes.** Each strand gets its own worker pool and
-   reloads every chromosome. One per-chromosome pass over both strands would
-   share the FASTA load, the motif scan, and worker start-up.
-3. **BED6 mode re-filters the whole BED per chromosome** in
-   `motif_anchor_arrays`, and reads `chrom`/`name` with the pandas `string`
-   dtype. Group once and read `chrom` as a category.
+1. **Split large chromosomes across workers** (for `kackle` and
+   `kackle-metaplot`). Both are now bounded by chr1. Chunks need `source +
+   target` bases of overlap for `kackle` (more if clusters span the
+   boundary) and `flank` bases for `kackle-metaplot`.
+2. **Dense per-chromosome arrays.** Each strand is read as a dense float64
+   array and converted to int32 (about 3 GB transient on chr1). Reading as
+   int32 directly, or reading covered intervals, would cut the per-worker
+   peak.
+3. **BED6 mode reads `chrom`/`name` with the pandas `string` dtype.** The BED
+   is now grouped once (`bed_anchor_index`); reading `chrom` as a category
+   would also shrink the loaded table.
 4. **`kackle-metaplot`:**
-   - **Split large chromosomes across workers.** At `-w 8` the run is
-     bounded by chr1. Splitting a chromosome into chunks (with `flank` bases
-     of overlap, assigning each site to the chunk that holds it) would let
-     more workers help.
+   - **Split large chromosomes across workers** (item 1); assign each site
+     to the chunk that holds it.
    - **A numba kernel for the sparse sum.** `chrom_window_sums` does
      `2 * flank + 1` NumPy gathers over each track's nonzero bases; a fused
      loop would be faster.
