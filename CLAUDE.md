@@ -68,11 +68,13 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
   the Hamming distance. Keep the backends identical; that's what the tests check. All FASTA reading goes
   through `open_fasta()` (pyfaidx, `.fai` index); there is no hand-rolled FASTA parser.
 - `bigwig.py` — the only boundary between in-memory dense arrays/sparse DataFrames and on-disk
-  bigWig files, via `figwig` (`BigWigReader` / `write_bigwig`).
+  bigWig files, via `figwig` (`BigWigReader`, and `open_bigwig_writer` / `write_chrom_intervals`
+  for streaming per-chromosome writes, or `write_bigwig` for a whole DataFrame).
 - `cli_common.py` — shared argparse formatting, BED6/chrom-sizes readers, and
   `intersect_ordered()` for reconciling chromosome sets across inputs.
-- `correction.py` — the `kmer_resample()` pipeline and the `kackle` CLI entry point
-  (`run_correction`).
+- `correction.py` — the `correct_bigwigs()` pipeline (both strands, streamed to bigWig) used by the
+  `kackle` CLI entry point (`run_correction`), and `kmer_resample()`, the one-strand library API
+  that returns a sparse DataFrame. Both share `_correct_strand_signal` and `_run_chromosomes`.
 - `plotting.py` — before/after metaplot generation and the `kackle-metaplot` CLI entry point
   (`run_metaplot`). The CLI path (`metaplot_profiles` → `chrom_window_sums`) works one
   chromosome at a time: it locates sites per chromosome inside the workers, reads each track
@@ -80,16 +82,18 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
   reading a window per site. It never builds a genome-wide site table. `metaplot_profile` (windowed
   reads, batched) is kept as the reference implementation the tests compare against.
 
-### Correction pipeline (`kmer_resample()` in `correction.py`)
+### Correction pipeline (`correct_bigwigs()` in `correction.py`)
 
-Plus- and minus-strand bigWigs are corrected **independently** (two full passes from
-`run_correction`). For each strand:
+One pass over chromosomes corrects both strands: each chromosome task locates (or looks up) its
+motif sites for both strands once, then corrects plus and minus **independently**, one after the
+other, so only one dense strand array is alive at a time. For each strand:
 
-1. Resolve motif sites either from a precomputed BED6 (`read_bed6`, loaded once, filtered to
-   strand and split into `(chrom, start-or-end)` anchor arrays via `motif_anchor_arrays()`) or from
+1. Resolve motif sites either from a precomputed BED6 (`read_bed6`, loaded once and grouped once
+   into per-chromosome, per-strand anchor arrays by `bed_anchor_index()`) or from
    a `FastaMotifSiteProvider`, which locates sites per chromosome on demand. Plus-strand anchors use
    the BED `start` column; minus-strand anchors use `end`.
-2. Chromosomes are corrected via `_correct_chromosome()`, run either serially or fanned out across
+2. Chromosomes are corrected via `_correct_chromosome_both_strands()` (`_correct_chromosome()` for
+   `kmer_resample`), run either serially or fanned out across
    `chrom_workers` (thread or process pool, chosen by `--worker-backend`). Each worker:
    - Opens a `figwig.BigWigReader` and reads the whole chromosome as one dense window
      (`read_chrom_values()` in `bigwig.py`), converting minus-strand values to absolute counts.
@@ -112,7 +116,10 @@ Plus- and minus-strand bigWigs are corrected **independently** (two full passes 
      windows (v0.1.0 wrote full source windows and v0.2.0 wrote overlapping target windows, and
      both raced and leaked spikes).
    - Output is converted to a sparse `(chrom, start, end, value)` DataFrame, dropping zero rows.
-3. Chromosome results are concatenated and passed to `write_bigwig()`.
+3. Each finished chromosome's sparse `(positions, values)` arrays (int32, nonzero bases only) are
+   written to both output bigWigs as soon as every earlier chromosome in `chrom_sizes` order is done
+   (`_run_chromosomes` buffers out-of-order results). No genome-wide table is built.
+   `kmer_resample()` instead collects one strand into a DataFrame.
 
 `resample_empirical()` (IQR-based resampling from the local empirical distribution) exists as an
 alternate strategy but is **not** wired into `correct_kmers()` — swap it in there if changing the

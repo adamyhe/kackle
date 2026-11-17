@@ -548,3 +548,123 @@ def test_provider_anchor_arrays_match_bed_mode_anchors(tmp_path, strand, keep_si
         assert [a.tolist() for a in anchors] == [w.tolist() for w in want]
         assert all(a.dtype == np.int32 for a in anchors)
         assert (sites is not None) == keep_sites
+
+
+def test_bed_anchor_index_matches_per_chrom_filtering(tmp_path):
+    fasta = tmp_path / "genome.fa"
+    fasta.write_text(">chr1\nTGGATGGAAnnttccaTGGcTTCCAtggaa\n>chr2\nACCATGG\n")
+    beds = locate_motif_specs(fasta, ["TGG:0", "TGGAA:1"])
+    chroms = ["chr1", "chr2", "chr3"]
+    index = cli.bed_anchor_index(beds, chroms)
+    for chrom in chroms:
+        for strand in ("+", "-"):
+            got = index[chrom][strand]
+            want = cli.motif_anchor_arrays(beds, strand, chrom)
+            assert [a.tolist() for a in got] == [w.tolist() for w in want]
+            assert all(a.dtype == np.int32 for a in got)
+
+
+def _random_signal_bigwigs(tmp_path, chrom_sizes, seed=0):
+    from kackle.bigwig import write_bigwig
+
+    rng = np.random.default_rng(seed)
+    paths = {}
+    for strand, sign in (("+", 1.0), ("-", -1.0)):
+        rows = []
+        for chrom, size in chrom_sizes:
+            pos = np.sort(rng.choice(size, size // 3, replace=False))
+            vals = rng.integers(1, 6, pos.size).astype(float)
+            spikes = rng.random(pos.size) < 0.05
+            vals[spikes] *= 40
+            rows.append(
+                pd.DataFrame(
+                    {"chrom": chrom, "start": pos, "end": pos + 1, "value": sign * vals}
+                )
+            )
+        paths[strand] = tmp_path / f"in{strand}.bw"
+        write_bigwig(pd.concat(rows, ignore_index=True), paths[strand], chrom_sizes)
+    return paths
+
+
+@pytest.mark.parametrize(
+    "chrom_workers,worker_backend",
+    [(1, "thread"), (3, "thread"), (2, "process")],
+)
+@pytest.mark.parametrize("mode", ["fasta", "bed"])
+def test_correct_bigwigs_matches_per_strand_kmer_resample(
+    tmp_path, monkeypatch, chrom_workers, worker_backend, mode
+):
+    from kackle.bigwig import read_chrom_values, write_bigwig
+
+    rng = np.random.default_rng(1)
+    chrom_sizes = [("chr1", 3000), ("chr2", 500), ("chr3", 2000), ("chrM", 40)]
+    fasta = tmp_path / "genome.fa"
+    fasta.write_text(
+        "".join(
+            f">{chrom}\n{''.join(rng.choice(list('ACGTN'), size, p=[.24, .24, .24, .24, .04]))}\n"
+            for chrom, size in chrom_sizes
+        )
+    )
+    inputs = _random_signal_bigwigs(tmp_path, chrom_sizes)
+    specs = ["TGG:0", "TGGAA:1"]
+    # Deterministic stand-in for the resampler: zero the target window of
+    # every anchor, so outputs are comparable without RNG. Spawned/forkserver
+    # worker processes would not see the patch, so the process case keeps the
+    # real kernel with a threshold nothing reaches (plumbing and order only).
+    threshold = 10
+    if worker_backend == "process":
+        threshold = 10**9
+    else:
+        monkeypatch.setattr(cli, "correct_kmers", _zeroing_correct_kmers)
+
+    def site_args(prefix):
+        if mode == "bed":
+            return {"motif_beds": locate_motif_specs(fasta, specs)}
+        return {
+            "motif_site_provider": cli.FastaMotifSiteProvider(
+                fasta, specs, bed6_fnames=cli.motif_bed6_fnames(prefix, specs)
+            )
+        }
+
+    want = {}
+    old_args = site_args(tmp_path / "old")
+    for strand in ("+", "-"):
+        rows = cli.kmer_resample(
+            inputs[strand], strand=strand, chroms=[c for c, _ in chrom_sizes],
+            source=4, target=2, threshold=threshold, verbose=False, **old_args,
+        )
+        want[strand] = tmp_path / f"want{strand}.bw"
+        write_bigwig(rows, want[strand], chrom_sizes)
+
+    got = {strand: tmp_path / f"got{strand}.bw" for strand in ("+", "-")}
+    cli.correct_bigwigs(
+        inputs, got, chrom_sizes, source=4, target=2, threshold=threshold,
+        chrom_workers=chrom_workers,
+        worker_backend=worker_backend, verbose=False, **site_args(tmp_path / "new"),
+    )
+
+    for strand in ("+", "-"):
+        assert got[strand].read_bytes() == want[strand].read_bytes()
+        for chrom, _ in chrom_sizes:
+            before = np.abs(read_chrom_values(inputs[strand], chrom))
+            after = read_chrom_values(got[strand], chrom)
+            assert (after <= before).all()
+    if mode == "fasta":
+        for old, new in zip(
+            cli.motif_bed6_fnames(tmp_path / "old", specs),
+            cli.motif_bed6_fnames(tmp_path / "new", specs),
+        ):
+            assert open(old).read() == open(new).read()
+            assert open(new).read()
+
+
+def _zeroing_correct_kmers(values, starts, source, target, threshold, strand):
+    out = values.copy()
+    for anchor in starts:
+        out[max(anchor - target, 0) : anchor + target] = 0
+    return out
+
+
+def test_correct_bigwigs_requires_sites(tmp_path):
+    with pytest.raises(ValueError, match="Either bed6_fname, motif_beds"):
+        cli.correct_bigwigs({"+": "a", "-": "b"}, {"+": "c", "-": "d"}, [("chr1", 5)])
