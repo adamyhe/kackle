@@ -85,8 +85,11 @@ def compare_strand_chrom(strand, chrom, length, paths, logs, source, target, exa
     in_window = np.cumsum(candidate)[:length] > 0
 
     gaps = np.diff(all_anchors)
-    near_prev = np.concatenate([[False], gaps < 2 * source])
-    near_next = np.concatenate([gaps < 2 * source, [False]])
+    close = gaps < 2 * source
+    near_prev = np.zeros(all_anchors.size, dtype=bool)
+    near_next = np.zeros(all_anchors.size, dtype=bool)
+    near_prev[1:] = close  # safe when there are no anchors
+    near_next[:-1] = close
     isolated = all_anchors[~(near_prev | near_next)]
     clustered = all_anchors[near_prev | near_next]
 
