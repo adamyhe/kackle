@@ -5,8 +5,8 @@ import textwrap
 
 import numpy as np
 import pandas as pd
-import pybigtools
 
+from kackle.bigwig import open_bigwig
 from kackle.cli_common import (
     DEFAULT_MOTIFS,
     KackleArgumentFormatter,
@@ -24,7 +24,6 @@ def motif_beds_from_fasta(
     motif_specs,
     chroms,
     both_strands=True,
-    fasta_backend="pyfastx",
     match_backend="ahocorasick",
 ):
     """Locate motif BED rows chromosome-by-chromosome from FASTA."""
@@ -32,7 +31,6 @@ def motif_beds_from_fasta(
         fasta_fname,
         motif_specs,
         both_strands=both_strands,
-        fasta_backend=fasta_backend,
         match_backend=match_backend,
     )
     beds = []
@@ -53,13 +51,33 @@ def motif_sites_by_strand(bed):
     }
 
 
-def metaplot_profile(before_bw, after_bw, sites, flank, absolute=False):
+def _read_centered_windows(bw, chroms, centers, flank):
+    """Read ``2 * flank + 1`` bases around each center, NaN outside the chromosome."""
+    width = flank * 2 + 1
+    starts = centers - flank
+    read_starts = np.maximum(starts, 0)
+    values = bw.read(chroms, read_starts, width, missing=0.0, oob=np.nan)
+    shift = read_starts - starts
+    for row in np.flatnonzero(shift > 0):
+        offset = min(int(shift[row]), width)
+        values[row, offset:] = values[row, : width - offset].copy()
+        values[row, :offset] = np.nan
+    return values.astype(np.float64)
+
+
+METAPLOT_BATCH_SITES = 100_000
+
+
+def metaplot_profile(
+    before_bw, after_bw, sites, flank, absolute=False, batch_size=METAPLOT_BATCH_SITES
+):
     """Return mean before/after signal centered on motif starts.
 
     Parameters
     ----------
-    before_bw, after_bw : object
-        Open pybigtools bigWig readers.
+    before_bw, after_bw : figwig.BigWigReader
+        Open bigWig readers (anything with ``chrom_sizes`` and a figwig-style
+        ``read(chroms, starts, width, missing=..., oob=...)``).
     sites : pandas.DataFrame
         Rows with ``chrom`` and ``start`` columns. ``start`` is the centered
         motif coordinate.
@@ -68,45 +86,41 @@ def metaplot_profile(before_bw, after_bw, sites, flank, absolute=False):
     absolute : bool
         Whether to aggregate absolute signal values. This is useful for
         negative-strand bigWigs whose input values are negative.
+    batch_size : int
+        Sites read per batch. Each batch holds a few ``(batch_size, 2 * flank
+        + 1)`` arrays, so memory stays bounded for genome-wide site sets
+        (~100M TGG sites per strand on hg38) at the cost of more read calls.
     """
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
     width = flank * 2 + 1
+    x = np.arange(-flank, flank + 1)
+    available = set(before_bw.chrom_sizes).intersection(after_bw.chrom_sizes)
+    sites = sites.loc[sites["chrom"].isin(available)]
+
     before_sum = np.zeros(width, dtype=np.float64)
     after_sum = np.zeros(width, dtype=np.float64)
     counts = np.zeros(width, dtype=np.int64)
-
-    for chrom, center in sites.itertuples(index=False, name=None):
-        center = int(center)
-        try:
-            chrom_size = min(before_bw.chroms(chrom), after_bw.chroms(chrom))
-        except KeyError:
-            continue
-        left = max(0, center - flank)
-        right = min(chrom_size, center + flank + 1)
-        if left >= right:
-            continue
-
-        dest_start = left - (center - flank)
-        dest_end = dest_start + (right - left)
-        before_values = before_bw.values(chrom, left, right, fillna=0.0)
-        after_values = after_bw.values(chrom, left, right, fillna=0.0)
+    all_chroms = sites["chrom"].to_numpy(dtype=object)
+    all_centers = sites["start"].to_numpy(dtype=np.int64)
+    for lo in range(0, len(all_centers), batch_size):
+        chroms = all_chroms[lo : lo + batch_size].astype(str)
+        centers = all_centers[lo : lo + batch_size]
+        before_values = _read_centered_windows(before_bw, chroms, centers, flank)
+        after_values = _read_centered_windows(after_bw, chroms, centers, flank)
         if absolute:
             before_values = np.abs(before_values)
             after_values = np.abs(after_values)
-
         valid = np.isfinite(before_values) & np.isfinite(after_values)
-        if not np.any(valid):
-            continue
-
-        target = np.arange(dest_start, dest_end)[valid]
-        before_sum[target] += before_values[valid]
-        after_sum[target] += after_values[valid]
-        counts[target] += 1
+        before_sum += np.where(valid, before_values, 0.0).sum(axis=0)
+        after_sum += np.where(valid, after_values, 0.0).sum(axis=0)
+        counts += valid.sum(axis=0)
 
     before_mean = np.full(width, np.nan, dtype=np.float64)
     after_mean = np.full(width, np.nan, dtype=np.float64)
     np.divide(before_sum, counts, out=before_mean, where=counts > 0)
     np.divide(after_sum, counts, out=after_mean, where=counts > 0)
-    return np.arange(-flank, flank + 1), before_mean, after_mean, counts
+    return x, before_mean, after_mean, counts
 
 
 def write_metaplot_png(x, before, after, counts, strand, out_fname):
@@ -157,17 +171,13 @@ def write_strand_metaplots(
     }
 
     for strand, (before_fname, after_fname, absolute, out_fname) in plot_specs.items():
-        before_bw = pybigtools.open(before_fname)
-        after_bw = pybigtools.open(after_fname)
-        try:
-            available_chroms = set(before_bw.chroms()).intersection(after_bw.chroms())
-            strand_sites = sites[strand].loc[sites[strand].chrom.isin(available_chroms)]
-            x, before, after, counts = metaplot_profile(
-                before_bw, after_bw, strand_sites, flank, absolute=absolute
-            )
-        finally:
-            before_bw.close()
-            after_bw.close()
+        x, before, after, counts = metaplot_profile(
+            open_bigwig(before_fname),
+            open_bigwig(after_fname),
+            sites[strand],
+            flank,
+            absolute=absolute,
+        )
         write_metaplot_png(x, before, after, counts, strand, out_fname)
         outputs[strand] = out_fname
     return outputs
@@ -246,12 +256,6 @@ def parse_metaplot_args():
         help="Motif spec for FASTA location. May be repeated.",
     )
     parser.add_argument(
-        "--fasta-backend",
-        choices=["auto", "python", "pyfastx"],
-        default="pyfastx",
-        help="FASTA reader for --fasta mode.",
-    )
-    parser.add_argument(
         "--motif-match-backend",
         choices=["auto", "python", "ahocorasick"],
         default="ahocorasick",
@@ -296,7 +300,6 @@ def run_metaplot():
             args.fasta,
             args.motif or DEFAULT_MOTIFS,
             chroms,
-            fasta_backend=args.fasta_backend,
             match_backend=args.motif_match_backend,
         )
     outputs = write_strand_metaplots(

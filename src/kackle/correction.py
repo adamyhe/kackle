@@ -9,10 +9,9 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 
 import numpy as np
 import pandas as pd
-import pybigtools
 import tqdm
 
-from kackle.bigwig import write_bigwig
+from kackle.bigwig import read_chrom_values, write_bigwig
 from kackle.cli_common import (
     DEFAULT_MOTIFS,
     KackleArgumentFormatter,
@@ -88,7 +87,6 @@ def _chrom_motif_beds(motif_site_provider, chrom, isolate_fasta=False):
             motif_site_provider.fasta_fname,
             motif_site_provider.motif_specs,
             both_strands=motif_site_provider.both_strands,
-            fasta_backend=motif_site_provider.fasta_backend,
             match_backend=motif_site_provider.match_backend,
         )
         return provider.for_chrom(chrom)
@@ -141,11 +139,9 @@ def _correct_chromosome(
 
         set_num_threads(numba_threads)
 
-    bw = pybigtools.open(bw_fname)
-    try:
-        values = bw.values(chrom, 0, bw.chroms(chrom), fillna=0.0).astype(np.int32)
-    finally:
-        bw.close()
+    values = read_chrom_values(
+        bw_fname, chrom, n_jobs=numba_threads if numba_threads is not None else 1
+    ).astype(np.int32)
 
     if strand == "-":
         values = np.abs(values)
@@ -345,7 +341,7 @@ def parse_args():
 
               kackle -i plus.bw -I minus.bw -f genome.fa -o corrected.plus.bw -O corrected.minus.bw -c chrom.sizes
 
-            FASTA mode defaults to motif passes {", ".join(DEFAULT_MOTIFS)} and locates sites one chromosome at a time using pyfastx plus ahocorasick-rs.
+            FASTA mode defaults to motif passes {", ".join(DEFAULT_MOTIFS)} and locates sites one chromosome at a time using pyfaidx plus ahocorasick-rs.
             """
         ),
         formatter_class=KackleArgumentFormatter,
@@ -444,15 +440,6 @@ def parse_args():
         help=(
             "When using --fasta, write generated motif sites to ordered BED6 "
             "files named PREFIX.N.MOTIF.mMISMATCHES.bed6."
-        ),
-    )
-    parser.add_argument(
-        "--fasta-backend",
-        choices=["auto", "python", "pyfastx"],
-        default="pyfastx",
-        help=(
-            "FASTA reader for --fasta mode. pyfastx is the default indexed "
-            "reader; python is a simple fallback useful for debugging."
         ),
     )
     parser.add_argument(
@@ -585,7 +572,6 @@ def run_correction():
             args.fasta,
             motif_specs,
             both_strands=not args.only_positive_strand,
-            fasta_backend=args.fasta_backend,
             match_backend=args.motif_match_backend,
             bed6_fnames=bed6_fnames,
         )
@@ -605,7 +591,7 @@ def run_correction():
         verbose=args.verbose,
     )
     print("Writing plus strand bigWig ...")
-    write_bigwig(pl_bg, args.out_pl_bw, chrom_sizes)
+    write_bigwig(pl_bg, args.out_pl_bw, chrom_sizes, n_jobs=thread_budget())
     del pl_bg
     gc.collect()
 
@@ -624,4 +610,4 @@ def run_correction():
         verbose=args.verbose,
     )
     print("Writing minus strand bigWig ...")
-    write_bigwig(mn_bg, args.out_mn_bw, chrom_sizes)
+    write_bigwig(mn_bg, args.out_mn_bw, chrom_sizes, n_jobs=thread_budget())

@@ -8,9 +8,7 @@ Kmer Artifact Correction (KACkle) -- A small python utility for eliminating k-me
 
 ## Installation
 
-Requires Python 3.10-3.13. 3.14 isn't supported yet because `pybigtools`'
-PyO3 bindings don't have a 3.14 build; the ceiling will be raised once an
-updated `pybigtools` release lands.
+Requires Python 3.10 or newer (tested on 3.10-3.14).
 
 Install with `pip`:
 
@@ -43,12 +41,14 @@ kackle -i plus.bw -I minus.bw -f genome.fa -o out.plus.bw -O out.minus.bw -c chr
 ```
 
 FASTA mode locates motif sites one chromosome at a time to avoid materializing
-whole-genome BED tables for common short motifs. It uses indexed `pyfastx`
-FASTA access and `ahocorasick-rs` multi-pattern matching by default:
+whole-genome BED tables for common short motifs. It reads the FASTA through
+`pyfaidx`, which writes a samtools-compatible `.fai` index next to the FASTA
+on first use (uncompressed or bgzip-compressed FASTA only), and matches motifs
+with `ahocorasick-rs` by default:
 
 ```bash
 kackle -i plus.bw -I minus.bw -f genome.fa \
-  --fasta-backend pyfastx --motif-match-backend ahocorasick \
+  --motif-match-backend ahocorasick \
   -o out.plus.bw -O out.minus.bw -c chrom.sizes
 ```
 

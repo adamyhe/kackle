@@ -2,6 +2,7 @@ import pytest
 
 from kackle.motifs import (
     FastaMotifSiteProvider,
+    fasta_chrom_names,
     locate_motif,
     locate_motif_in_sequence,
     locate_motif_specs,
@@ -119,30 +120,40 @@ def test_fasta_motif_site_provider_locates_one_chromosome_at_a_time(tmp_path):
     assert tggaa_bed.empty
 
 
-def test_fasta_motif_site_provider_pyfastx_matches_python(tmp_path):
+def test_fasta_motif_site_provider_ahocorasick_matches_python(tmp_path):
     fasta = tmp_path / "genome.fa"
     write_fasta(fasta, [("chr1", "TGGATGGAA"), ("chr2", "ACCATGG")])
     python_provider = FastaMotifSiteProvider(
         fasta,
         ["TGG:0", "TGGAA:1"],
         both_strands=True,
-        fasta_backend="python",
         match_backend="python",
     )
-    pyfastx_provider = FastaMotifSiteProvider(
+    ahocorasick_provider = FastaMotifSiteProvider(
         fasta,
         ["TGG:0", "TGGAA:1"],
         both_strands=True,
-        fasta_backend="pyfastx",
         match_backend="ahocorasick",
     )
 
     python_beds = python_provider.for_chrom("chr1")
-    pyfastx_beds = pyfastx_provider.for_chrom("chr1")
+    ahocorasick_beds = ahocorasick_provider.for_chrom("chr1")
 
-    assert [bed.to_dict("records") for bed in pyfastx_beds] == [
+    assert [bed.to_dict("records") for bed in ahocorasick_beds] == [
         bed.to_dict("records") for bed in python_beds
     ]
+
+
+def test_fasta_chrom_names_and_sequences_use_first_header_token(tmp_path):
+    fasta = tmp_path / "genome.fa"
+    fasta.write_text(">chr1 assembled chromosome\ntggaTGG\nAA\n>chr2\nACCA\n")
+
+    provider = FastaMotifSiteProvider(fasta, ["TGG:0"], match_backend="python")
+
+    assert fasta_chrom_names(fasta) == ["chr1", "chr2"]
+    assert provider.sequence("chr1") == "tggaTGGAA"
+    with pytest.raises(KeyError):
+        provider.sequence("chr3")
 
 
 def test_fasta_motif_site_provider_streams_bed6_outputs_once_per_chromosome(tmp_path):
@@ -154,7 +165,6 @@ def test_fasta_motif_site_provider_streams_bed6_outputs_once_per_chromosome(tmp_
         fasta,
         ["TGG:0", "TGGAA:1"],
         both_strands=True,
-        fasta_backend="python",
         match_backend="python",
         bed6_fnames=[tgg_bed, tggaa_bed],
     )

@@ -4,7 +4,8 @@ import argparse
 
 import numpy as np
 import pandas as pd
-import pybigtools
+
+from kackle.bigwig import bigwig_chrom_sizes
 
 
 DEFAULT_MOTIFS = ("TGG:0", "TGGAA:1")
@@ -55,11 +56,7 @@ def read_chrom_sizes(chrom_sizes_fname):
 
 def bigwig_chrom_names(bw_fname):
     """Return chromosome names present in a bigWig."""
-    bw = pybigtools.open(bw_fname)
-    try:
-        return list(bw.chroms().keys())
-    finally:
-        bw.close()
+    return list(bigwig_chrom_sizes(bw_fname))
 
 
 def intersect_ordered(items, *chrom_name_sets, key=None):
