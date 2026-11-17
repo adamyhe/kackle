@@ -59,9 +59,41 @@ itself was negligible.
    `motif_anchor_arrays`, and reads `chrom`/`name` with the pandas `string`
    dtype. Group once and read `chrom` as a category.
 
+6. **`kackle-metaplot` is too slow for whole genomes.** On hg38 there are
+   about 100M TGG/TGGAA sites per strand. In 0.2.0 each plot took 40–60
+   minutes (per-site Python loop with two bigWig reads per site). Batched
+   reads (#4) bound memory, but three costs remain: motif location (about 33
+   CPU-minutes for hg38) is repeated on every invocation, the whole-genome
+   motif BED table is materialized, and every site still gets a 101-base read.
+   A standalone prototype that fixes all three matched `metaplot_profile` to
+   float32 rounding. On hg38 it located sites in 4 minutes (16 processes) and
+   plotted 6 samples x 6 tracks in about 40 minutes:
+   - stream sites one chromosome at a time, with chromosomes in parallel;
+   - read each track densely once per chromosome, and sum over its *nonzero*
+     bases against a per-base site-count vector,
+     `sum_i sig[c_i + k] = sum_{p: sig[p] != 0} sig[p] * n_sites[p - k]`.
+     PRO-seq signal is sparse (about 12M covered bases genome-wide), so this
+     costs O(nnz × width) instead of O(sites × width);
+   - optionally cache sites (they depend only on the genome and motif specs),
+     overlay several "after" tracks in one figure, and plot each motif spec
+     separately instead of pooling them.
+
+   Avoid genome-scale `kackle-metaplot` runs until this lands.
+
+## Open questions
+
+### Corrected TGGAA sites sit slightly below their flanks
+
+On 6 real PRO-seq samples, the signal at the TGGAA:1 artifact position after
+correction is 0.88–0.90 of the mean at ±20–50 bp, compared with 0.99–1.01
+at TGG sites and about 14× in the input. This holds for every version,
+v0.1.0 included. It could be mild over-correction: TGGAA sites are almost
+all TGG sites too, so they have already been corrected once by the first
+pass. Or the artifact position could have genuinely lower signal. A check:
+compare against a library without the primer artifact, or against TGGAA
+sites that the TGG pass did not flag.
+
 ## In progress elsewhere
 
-- [#4](https://github.com/adamyhe/kackle/pull/4): replace pybigtools with
-  figwig and pyfastx with pyfaidx, and support Python 3.14.
 - `compare-versions` branch: scripts to compare outputs across releases,
   with an exact (seeded, un-jitted) mode and a statistical mode.

@@ -7,16 +7,53 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
 
 ## [Unreleased]
 
+### Added
+
+- Support for Python 3.14. No compiled bigWig or FASTA dependencies remain
+  ([#4](https://github.com/adamyhe/kackle/pull/4)).
+- `figwig[fast]` extra, which adds the libdeflate compressor for bigWig
+  writing ([#4](https://github.com/adamyhe/kackle/pull/4)).
+
 ### Changed
 
+- **bigWig I/O uses figwig instead of pybigtools**
+  ([#4](https://github.com/adamyhe/kackle/pull/4)). figwig's reader threads are
+  capped at the per-worker numba thread count. `write_bigwig` writes one chromosome at a
+  time. Corrected output is unchanged: on 6 real PRO-seq samples it matched
+  0.2.0 within resampling noise.
+- **FASTA access uses pyfaidx instead of pyfastx**
+  ([#4](https://github.com/adamyhe/kackle/pull/4)). Chromosome names come
+  from the `.fai` index, which is built once in the parent process before
+  chromosome workers start. FASTA input must be uncompressed or
+  bgzip-compressed (plain gzip isn't supported), and pyfaidx writes a `.fai`
+  next to the FASTA on first use.
 - **Nearby flagged sites are now corrected together** (`correct_kmers`).
   Flagged anchors closer than `source + target` are merged into a cluster, and
   each cluster's `[first - target, last + target)` span is redrawn once from
   the flanks just outside it. The redrawn total is the flank sum scaled by
   `span_width / (2 * target)`. Isolated sites are unchanged. Outputs differ
-  from 0.2.0 only where flagged sites are close together.
+  from 0.2.0 only where flagged sites are close together. On 6 real PRO-seq
+  samples, clustered-window totals fell 0.8–1.5% and genome-wide signal fell
+  0.16–0.30 percentage points relative to 0.2.0.
+
+### Removed
+
+- `--fasta-backend` on `kackle` and `kackle-metaplot`, the hand-rolled FASTA
+  parser, and the `fasta_backend` argument of `FastaMotifSiteProvider`
+  ([#4](https://github.com/adamyhe/kackle/pull/4)). Passing
+  `--fasta-backend` is now an argparse error. The `python` motif-match
+  backend is kept as a reference implementation.
 
 ### Fixed
+
+- `kackle-metaplot` reads motif windows in batches of 100,000 sites instead
+  of all at once, so memory no longer grows with the site count (genome-wide
+  hg38 TGG sites would have needed about 80 GB per array)
+  ([#4](https://github.com/adamyhe/kackle/pull/4)).
+- `--worker-backend thread` no longer crashes on a FASTA without an index.
+  Under pyfastx, chromosome workers raced to build the `.fxi`; the pyfaidx
+  `.fai` is built once before workers start
+  ([#4](https://github.com/adamyhe/kackle/pull/4)).
 
 - Overlapping target windows of flagged sites less than `2 * target` apart no
   longer race under parallel execution. Previously the last writer won, so
