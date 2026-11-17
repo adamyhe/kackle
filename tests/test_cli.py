@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 import kackle.correction as cli
+from kackle.motifs import locate_motif_specs
 from kackle.cli_common import intersect_ordered
 
 
@@ -506,7 +507,7 @@ def test_parse_args_defaults_to_fast_fasta_backends(monkeypatch):
 
     args = cli.parse_args()
 
-    assert args.motif_match_backend == "ahocorasick"
+    assert args.motif_match_backend == "auto"
     assert args.chrom_workers == "auto"
     assert args.numba_threads == "auto"
     assert args.worker_backend == "process"
@@ -524,8 +525,26 @@ def test_parse_args_help_describes_modes_and_defaults(monkeypatch, capsys):
     assert "Precomputed BED6 motif locations" in help_text
     assert "Reference FASTA used to locate motif sites directly" in help_text
     assert "defaults to motif passes TGG:0, TGGAA:1" in help_text
-    assert "pyfaidx plus" in help_text
-    assert "(default: ahocorasick)" in help_text
+    assert "pyfaidx and a numba motif matcher" in help_text
+    assert "(default: auto)" in help_text
     assert "--chrom-workers" in help_text
     assert "--numba-threads" in help_text
     assert "--worker-backend" in help_text
+
+
+@pytest.mark.parametrize("strand", ["+", "-"])
+@pytest.mark.parametrize("keep_sites", [False, True])
+def test_provider_anchor_arrays_match_bed_mode_anchors(tmp_path, strand, keep_sites):
+    fasta = tmp_path / "genome.fa"
+    fasta.write_text(">chr1\nTGGATGGAAnnttccaTGGcTTCCAtggaa\n>chr2\nACCATGG\n")
+    specs = ["TGG:0", "TGGAA:1"]
+    provider = cli.FastaMotifSiteProvider(fasta, specs)
+    beds = locate_motif_specs(fasta, specs)
+    for chrom in ("chr1", "chr2"):
+        anchors, sites = cli._provider_anchor_arrays(
+            provider, chrom, strand, keep_sites=keep_sites, isolate_fasta=False
+        )
+        want = cli.motif_anchor_arrays(beds, strand, chrom)
+        assert [a.tolist() for a in anchors] == [w.tolist() for w in want]
+        assert all(a.dtype == np.int32 for a in anchors)
+        assert (sites is not None) == keep_sites

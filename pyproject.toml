@@ -29,7 +29,6 @@ dependencies = [
     "pandas",
     "tqdm",
     "numba",
-    "ahocorasick-rs>=1.0.3",
     "matplotlib>=3.7",
     "figwig[fast]>=0.3.1",
     "pyfaidx>=0.9.2.2",

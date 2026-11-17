@@ -26,7 +26,7 @@ def motif_beds_from_fasta(
     motif_specs,
     chroms,
     both_strands=True,
-    match_backend="ahocorasick",
+    match_backend="auto",
 ):
     """Locate motif BED rows chromosome-by-chromosome from FASTA."""
     provider = FastaMotifSiteProvider(
@@ -233,22 +233,25 @@ STRAND_ABSOLUTE = {"+": False, "-": True}
 def _provider_sites(provider, chrom):
     """``{strand: starts}`` for one chromosome, pooled over motif specs.
 
-    Pulls the start arrays out of each motif table and drops the tables right
-    away, so they don't overlap with the dense-track phase (and are never
-    concatenated into one more copy).
+    Uses the provider's start arrays directly, so no BED6 tables are built.
+    Providers with only ``for_chrom`` go through their tables.
     """
-    parts = {strand: [] for strand in STRAND_ABSOLUTE}
-    beds = provider.for_chrom(chrom)
-    while beds:
-        bed = beds.pop()
-        strands = bed["strand"].to_numpy()
-        starts = bed["start"].to_numpy(np.int64)
-        for strand in STRAND_ABSOLUTE:
-            parts[strand].append(starts[strands == strand])
-        del bed, strands, starts
+    if not hasattr(provider, "starts_for_chrom"):
+        beds = provider.for_chrom(chrom)
+        spec_starts = [
+            {s: bed.loc[bed.strand == s, "start"].to_numpy(np.int64) for s in STRAND_ABSOLUTE}
+            for bed in beds
+        ]
+        del beds
+    else:
+        spec_starts = provider.starts_for_chrom(chrom)
     return {
-        strand: np.concatenate(arrays) if arrays else np.empty(0, dtype=np.int64)
-        for strand, arrays in parts.items()
+        strand: (
+            np.concatenate([starts[strand] for starts in spec_starts])
+            if spec_starts
+            else np.empty(0, dtype=np.int64)
+        )
+        for strand in STRAND_ABSOLUTE
     }
 
 
@@ -545,9 +548,9 @@ def parse_metaplot_args():
     )
     parser.add_argument(
         "--motif-match-backend",
-        choices=["auto", "python", "ahocorasick"],
-        default="ahocorasick",
-        help="Pattern matcher for --fasta mode.",
+        choices=["auto", "numba", "numpy", "python", "ahocorasick"],
+        default="auto",
+        help="Motif matcher for --fasta mode (see kackle --help); all give identical sites.",
     )
     parser.add_argument(
         "--flank",
