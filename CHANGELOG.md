@@ -23,7 +23,7 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   densely once, and the profile is summed over the track's nonzero bases
   instead of reading a 101-base window per site. No genome-wide site table is
   built. Output is unchanged (matches the windowed implementation to
-  floating-point rounding). A whole-genome hg38 plot (about 230M sites per
+  floating-point rounding). A whole-genome hg38 plot (about 115M sites per
   strand, pooled over both motifs) takes 12 minutes with 4 workers or 5.5
   minutes with 8, with about 11 GB peak per worker. 0.2.0 took 40–60 minutes.
 - **bigWig I/O uses figwig instead of pybigtools**
