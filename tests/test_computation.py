@@ -113,3 +113,110 @@ def test_parallel_artifact_mask_is_faster_than_serial_baseline():
     serial_time = best_time(artifact_mask_serial, signal, starts, 10, 10, "+")
 
     assert parallel_time < serial_time
+
+
+def _flank_sum(signal, first, last, source, target):
+    return int(
+        signal[first - source : first - target].sum()
+        + signal[last + target : last + source].sum()
+    )
+
+
+def _spiked_signal(length, anchors, background=2, spike=500):
+    signal = np.full(length, background, dtype=np.int32)
+    signal[np.asarray(anchors) - 1] = spike  # plus-strand artifact position
+    return signal
+
+
+def test_correct_kmers_isolated_site_redraws_flank_total_in_target_window():
+    signal = _spiked_signal(200, [100])
+    signal[85:95] = np.arange(10)  # make the flanks distinguishable
+
+    corrected = correct_kmers(signal, np.array([100], dtype=np.int32), 10, 5, 10, "+")
+
+    changed = np.flatnonzero(corrected != signal)
+    assert set(changed.tolist()) <= set(range(95, 105))
+    assert corrected[95:105].sum() == _flank_sum(signal, 100, 100, 10, 5)
+
+
+@pytest.mark.parametrize("gap", [0, 3, 8, 12, 14])
+def test_correct_kmers_merges_interfering_sites_into_one_span(gap):
+    source, target = 10, 5
+    first, last = 100, 100 + gap
+    signal = _spiked_signal(300, [first, last])
+
+    corrected = correct_kmers(
+        signal, np.array([first, last], dtype=np.int32), source, target, 10, "+"
+    )
+
+    span = slice(first - target, last + target)
+    width = (last + target) - (first - target)
+    expected = (_flank_sum(signal, first, last, source, target) * width + target) // (
+        2 * target
+    )
+    # Neither spike leaks into the redrawn total, and nothing outside the span moves.
+    assert corrected[span].sum() == expected
+    outside = np.ones(signal.shape[0], dtype=bool)
+    outside[span] = False
+    assert np.array_equal(corrected[outside], signal[outside])
+    assert corrected.max() < 500
+
+
+def test_correct_kmers_resamples_distant_sites_independently():
+    source, target = 10, 5
+    anchors = [100, 100 + source + target]  # just far enough apart not to merge
+    signal = _spiked_signal(300, anchors)
+
+    corrected = correct_kmers(signal, np.array(anchors, dtype=np.int32), source, target, 10, "+")
+
+    for anchor in anchors:
+        window = corrected[anchor - target : anchor + target]
+        assert window.sum() == _flank_sum(signal, anchor, anchor, source, target)
+
+
+def test_correct_kmers_unflagged_neighbor_does_not_join_cluster():
+    source, target = 10, 5
+    signal = _spiked_signal(300, [100])
+    starts = np.array([100, 104], dtype=np.int32)  # 104 is a candidate but not a spike
+
+    corrected = correct_kmers(signal, starts, source, target, 10, "+")
+
+    assert corrected[95:105].sum() == _flank_sum(signal, 100, 100, source, target)
+    assert np.array_equal(corrected[105:], signal[105:])
+
+
+def test_correct_kmers_conserves_cluster_totals_under_parallel_dense_overlaps():
+    # Many spiked sites at random spacings, unsorted and with duplicates. Every
+    # cluster's span total must equal its scaled flank total, which fails if
+    # parallel workers race on overlapping windows. Dense neighbors can hide a
+    # spike from the screen, so the expected flagged set comes from the
+    # reference screen rather than from where spikes were planted.
+    source, target = 10, 5
+    rng = np.random.default_rng(0)
+    gaps = rng.integers(0, 40, 5_000)
+    anchors = 50 + np.cumsum(gaps)
+    signal = _spiked_signal(int(anchors[-1]) + 100, anchors, background=3)
+    starts = rng.permutation(np.concatenate([anchors, anchors[::7]])).astype(np.int32)
+
+    corrected = correct_kmers(signal, starts, source, target, 10, "+")
+
+    flagged = np.unique(starts[artifact_mask_serial(signal, starts, source, 10, "+")])
+    assert flagged.size > 1000
+    breaks = np.flatnonzero(np.diff(flagged) >= source + target) + 1
+    for cluster in np.split(flagged, breaks):
+        first, last = int(cluster[0]), int(cluster[-1])
+        width = (last + target) - (first - target)
+        flank = _flank_sum(signal, first, last, source, target)
+        assert corrected[first - target : last + target].sum() == (
+            (flank * width + target) // (2 * target)
+        )
+
+
+def test_correct_kmers_minus_strand_uses_anchor_as_artifact_position():
+    signal = np.full(200, 2, dtype=np.int32)
+    signal[100] = 500  # minus-strand artifact position is the anchor itself
+
+    corrected = correct_kmers(signal, np.array([100], dtype=np.int32), 10, 5, 10, "-")
+
+    assert corrected[95:105].sum() == _flank_sum(signal, 100, 100, 10, 5)
+    assert corrected.max() < 500

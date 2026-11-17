@@ -116,6 +116,30 @@ def resample_empirical(
     return arr_
 
 
+@njit(cache=True)
+def _flagged_clusters(flagged_starts, link_distance):
+    """Split sorted flagged anchors into clusters of mutually interfering sites.
+
+    Consecutive anchors closer than ``link_distance`` belong to the same
+    cluster. Returns an array of cluster boundaries into ``flagged_starts``:
+    cluster ``c`` is ``flagged_starts[bounds[c] : bounds[c + 1]]``.
+    """
+    n = flagged_starts.shape[0]
+    bounds = np.empty(n + 1, dtype=np.int64)
+    n_clusters = 0
+    if n == 0:
+        bounds[0] = 0
+        return bounds[:1]
+    bounds[0] = 0
+    for k in range(1, n):
+        if flagged_starts[k] - flagged_starts[k - 1] >= link_distance:
+            n_clusters += 1
+            bounds[n_clusters] = k
+    n_clusters += 1
+    bounds[n_clusters] = n
+    return bounds[: n_clusters + 1]
+
+
 @njit(parallel=True, cache=True)
 def correct_kmers(
     chromosome_signal_vector: np.array,
@@ -127,39 +151,51 @@ def correct_kmers(
 ) -> np.array:
     """Correct suspicious kmer-centered signal spikes in a dense vector.
 
-    Candidate starts are screened, resampled, and written back in one fused
-    parallel pass. Thresholds and flanking totals are read from the input vector
-    for this motif pass, while only the central target window is updated in the
-    returned copy.
+    1. Every candidate anchor is screened against the input vector: it is
+       flagged when its artifact position exceeds ``threshold`` times the mean
+       of the rest of its ``[anchor - source, anchor + source)`` neighborhood.
+    2. Flagged anchors closer than ``source + target`` are merged into one
+       cluster, because at that distance one site's flank would overlap
+       another's target window (and closer than ``2 * target`` their target
+       windows overlap outright).
+    3. Each cluster is resampled once. Its target span is
+       ``[first - target, last + target)`` and its flanks are the
+       ``source - target`` bases just outside that span on each side, so
+       neither can contain another cluster's spike. The span is redrawn with
+       a Dirichlet-multinomial whose total is the flank sum scaled by
+       ``span_width / (2 * target)``.
+
+    An isolated flagged site is a cluster of one, whose total is exactly its
+    flank sum, as in earlier releases. Clusters are disjoint, so the parallel
+    resampling has no write races, and only target spans are modified.
     """
     out_vec = chromosome_signal_vector.copy()
     if starts.shape[0] == 0:
         return out_vec
 
-    alpha = np.ones(target * 2)
-    signal_len = len(chromosome_signal_vector)
-    for i in prange(starts.shape[0]):
-        start = starts[i]
-        if start - source < 0 or start + source > signal_len:
-            continue
-        suspicious_signal_idx = start - 1 if strand == "+" else start
-        suspicious_signal = chromosome_signal_vector[suspicious_signal_idx]
-        neighborhood_sum = 0
-        left_flank_sum = 0
-        right_flank_sum = 0
-        for j in range(start - source, start + source):
-            value = chromosome_signal_vector[j]
-            neighborhood_sum += value
-            if j < start - target:
-                left_flank_sum += value
-            elif j >= start + target:
-                right_flank_sum += value
-        suspicious_background = (neighborhood_sum - suspicious_signal) / (source * 2 - 1)
-        if suspicious_signal <= threshold * suspicious_background:
-            continue
+    flagged = artifact_mask_parallel(
+        chromosome_signal_vector, starts, source, threshold, strand
+    )
+    flagged_starts = np.sort(starts[flagged].astype(np.int64))
+    if flagged_starts.shape[0] == 0:
+        return out_vec
+    bounds = _flagged_clusters(flagged_starts, source + target)
 
-        probs = np.random.dirichlet(alpha)
-        resampled = np.random.multinomial(left_flank_sum + right_flank_sum, probs)
-        for j in range(target * 2):
-            out_vec[start - target + j] = resampled[j]
+    for c in prange(bounds.shape[0] - 1):
+        start = flagged_starts[bounds[c]]
+        last = flagged_starts[bounds[c + 1] - 1]
+        span_lo = start - target
+        span_hi = last + target
+        flank_sum = 0
+        for j in range(start - source, span_lo):
+            flank_sum += chromosome_signal_vector[j]
+        for j in range(span_hi, last + source):
+            flank_sum += chromosome_signal_vector[j]
+        width = span_hi - span_lo
+        # Width-scaled total, rounded half up; equals flank_sum when isolated.
+        total = (flank_sum * width + target) // (2 * target)
+        probs = np.random.dirichlet(np.ones(width))
+        resampled = np.random.multinomial(total, probs)
+        for j in range(width):
+            out_vec[span_lo + j] = resampled[j]
     return out_vec
