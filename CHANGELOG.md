@@ -24,7 +24,11 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   instead of building a sorted pandas BED6 table for every motif. `kackle`
   locates only the strand each pass corrects. BED6 tables are built only for
   `--out-bed6-prefix` and the `locate_motif*` / `for_chrom` helpers, with the
-  same contents as before. Sites are identical to 0.2.0.
+  same contents as before. Sites are identical to 0.2.0. On hg38, locating
+  all sites fell from 22 minutes and 9.1 GB to 39 s and 0.8 GB; a `kackle`
+  run with 4 workers from 40 to 4 minutes (37.7 to 10.4 GB peak), and a
+  whole-genome `kackle-metaplot` from 5 minutes to 1 with 8 workers (6.9 to
+  1.8 GB per worker).
   `--motif-match-backend` now takes `auto` (default: numba, or `python`
   when numba JIT is disabled), `numba` or `python`.
 - **`kackle-metaplot` runs at genome scale.** It now works one chromosome at
