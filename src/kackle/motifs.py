@@ -388,29 +388,61 @@ class FastaMotifSiteProvider:
             for bed6_fname in self.bed6_fnames:
                 open(bed6_fname, "w").close()
 
-    def sequence(self, chrom):
-        """Return the requested chromosome sequence."""
+    def __getstate__(self):
+        # The pyfaidx handle is reopened lazily; don't pickle it to workers.
+        state = self.__dict__.copy()
+        state["_pyfaidx_fasta"] = None
+        return state
+
+    def _record(self, chrom):
         if self._pyfaidx_fasta is None:
             self._pyfaidx_fasta = open_fasta(self.fasta_fname)
         if chrom not in self._pyfaidx_fasta:
             raise KeyError(f"Chromosome {chrom!r} not found in {self.fasta_fname}")
-        return self._pyfaidx_fasta[chrom][:]
+        return self._pyfaidx_fasta[chrom]
 
-    def starts_for_chrom(self, chrom, strands=None):
-        """Return one ``{strand: starts}`` dict per motif spec, in spec order.
+    def sequence(self, chrom, start=None, end=None):
+        """Return the requested chromosome sequence, or ``[start, end)`` of it."""
+        record = self._record(chrom)
+        if start is None and end is None:
+            return record[:]
+        return record[start:end]
 
-        Starts are sorted int64 arrays (see :func:`locate_motif_starts`). Pass
-        ``strands=("+",)`` or ``("-",)`` to search only one strand; a strand
-        that isn't searched, or any minus strand when ``both_strands`` is
-        false, gets an empty array.
+    @property
+    def max_motif_length(self):
+        """Length of the longest motif, i.e. the farthest a minus anchor sits from its start."""
+        return max(len(spec.motif) for spec in self.motif_specs)
+
+    def starts_for_region(self, chrom, start, end, strands=None):
+        """Like :meth:`starts_for_chrom`, for the windows starting in ``[start, end)``.
+
+        Starts are absolute chromosome positions. The sequence is read from
+        ``start`` to ``end + max_motif_length - 1`` (clipped to the record),
+        so the result equals ``starts_for_chrom`` filtered to that range.
         """
+        length = len(self._record(chrom))
+        start = max(0, int(start))
+        end = min(int(end), length)
+        if end <= start:
+            empty = np.empty(0, dtype=np.int64)
+            return [{s: empty for s in STRANDS} for _ in self.motif_specs]
+        sequence = self.sequence(
+            chrom, start, min(length, end + self.max_motif_length - 1)
+        )
+        spec_starts = self._locate(sequence, strands)
+        del sequence
+        for starts in spec_starts:
+            for strand, arr in starts.items():
+                starts[strand] = arr[arr < end - start] + start
+        return spec_starts
+
+    def _locate(self, sequence, strands):
         if strands is None:
             strands = STRANDS if self.both_strands else ("+",)
         elif not self.both_strands:
             strands = tuple(s for s in strands if s == "+")
-        sequence = self.sequence(chrom)
         encoded = _encode_for(sequence, self.match_backend)
-        del sequence
+        del sequence  # free the str copy; only the encoded bytes are scanned
         return [
             locate_motif_starts(
                 None,
@@ -422,6 +454,16 @@ class FastaMotifSiteProvider:
             )
             for spec in self.motif_specs
         ]
+
+    def starts_for_chrom(self, chrom, strands=None):
+        """Return one ``{strand: starts}`` dict per motif spec, in spec order.
+
+        Starts are sorted int64 arrays (see :func:`locate_motif_starts`). Pass
+        ``strands=("+",)`` or ``("-",)`` to search only one strand; a strand
+        that isn't searched, or any minus strand when ``both_strands`` is
+        false, gets an empty array.
+        """
+        return self._locate(self.sequence(chrom), strands)
 
     def beds_from_starts(self, chrom, spec_starts):
         """BED6 tables (one per motif spec) from ``starts_for_chrom`` output."""

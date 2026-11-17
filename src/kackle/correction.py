@@ -12,7 +12,12 @@ import numpy as np
 import pandas as pd
 import tqdm
 
-from kackle.bigwig import open_bigwig_writer, read_chrom_values, write_chrom_intervals
+from kackle.bigwig import (
+    bigwig_chrom_sizes,
+    open_bigwig_writer,
+    read_chrom_values,
+    write_chrom_intervals,
+)
 from kackle.cli_common import (
     DEFAULT_MOTIFS,
     KackleArgumentFormatter,
@@ -37,6 +42,17 @@ def parse_positive_int_or_auto(value):
         raise argparse.ArgumentTypeError("must be a positive integer or 'auto'") from exc
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
+def parse_non_negative_int(value):
+    """Parse a non-negative integer CLI value."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
     return parsed
 
 
@@ -199,15 +215,28 @@ def _set_numba_threads(numba_threads):
 
 
 def _correct_strand_signal(
-    bw_fname, chrom, strand, anchor_arrays, source, target, threshold, n_jobs
+    bw_fname,
+    chrom,
+    strand,
+    anchor_arrays,
+    source,
+    target,
+    threshold,
+    n_jobs,
+    start=0,
+    end=None,
 ):
-    """Read, correct and sparsify one strand of one chromosome.
+    """Read, correct and sparsify one strand of a chromosome or of ``[start, end)``.
 
-    Returns ``(positions, values)``: the int32 positions of the corrected
-    signal's nonzero bases and their (integer) values. The dense arrays are
-    freed before returning.
+    Anchors are relative to ``start``. Returns ``(positions, values)``: the
+    int32 positions (relative to ``start``) of the corrected signal's nonzero
+    bases and their (integer) values. The dense arrays are freed before
+    returning.
     """
-    values = read_chrom_values(bw_fname, chrom, n_jobs=n_jobs).astype(np.int32)
+    region = {} if end is None and not start else {"start": start, "end": end}
+    values = read_chrom_values(bw_fname, chrom, n_jobs=n_jobs, **region).astype(
+        np.int32
+    )
     if strand == "-":
         np.abs(values, out=values)
     for starts in anchor_arrays:
@@ -273,9 +302,42 @@ def _correct_chromosome(
     return chrom, positions, values, chrom_sites
 
 
-def _correct_chromosome_both_strands(
+def _provider_region_anchor_arrays(
+    motif_site_provider, chrom, start, end, strands, keep_sites, isolate_fasta
+):
+    """``{strand: anchor_arrays}`` for anchors in ``[start, end)``, relative to ``start``.
+
+    The provider must have ``starts_for_region``. A minus anchor is
+    ``site start + len(motif)``, so sites are located from
+    ``start - max_motif_length``. ``sites`` (when ``keep_sites``) holds the
+    sites that *start* in ``[start, end)``, so chunks' sites tile the
+    chromosome for ``--out-bed6-prefix``.
+    """
+    provider = _isolated_provider(motif_site_provider, isolate_fasta)
+    located = ("+", "-") if keep_sites else tuple(strands)
+    spec_starts = provider.starts_for_region(
+        chrom, start - provider.max_motif_length, end, strands=located
+    )
+    anchors = {}
+    for strand in strands:
+        arrays = []
+        for spec, starts in zip(provider.motif_specs, spec_starts):
+            anchor = starts[strand] + (len(spec.motif) if strand == "-" else 0)
+            anchor = anchor[(anchor >= start) & (anchor < end)] - start
+            arrays.append(anchor.astype(np.int32))
+        anchors[strand] = arrays
+    sites = None
+    if keep_sites:
+        sites = [
+            {strand: arr[arr >= start] for strand, arr in starts.items()}
+            for starts in spec_starts
+        ]
+    return anchors, sites
+
+
+def _correct_region_both_strands(
+    region,
     bw_fnames,
-    chrom,
     strand_anchors,
     motif_site_provider,
     source,
@@ -285,28 +347,43 @@ def _correct_chromosome_both_strands(
     numba_threads=None,
     keep_sites=False,
 ):
-    """Correct both strands of one chromosome, one strand at a time.
+    """Correct both strands of one chromosome region, one strand at a time.
 
-    ``bw_fnames`` maps ``"+"``/``"-"`` to input bigWigs. Anchors come from
-    ``strand_anchors`` (``{strand: anchor_arrays}``) or, when it is ``None``,
-    from ``motif_site_provider``, which locates both strands in one call.
-    Returns ``(chrom, {strand: (positions, values)}, sites or None)``.
+    ``region`` is ``(chrom, start, end)``; ``end=None`` (with ``start=0``)
+    means the whole chromosome. ``bw_fnames`` maps ``"+"``/``"-"`` to input
+    bigWigs. Anchors, relative to ``start``, come from ``strand_anchors``
+    (``{strand: anchor_arrays}``) or, when it is ``None``, from
+    ``motif_site_provider``, which locates both strands in one call.
+    Returns ``(region, {strand: (positions, values)}, sites or None)``, with
+    absolute positions.
     """
     _set_numba_threads(numba_threads)
+    chrom, start, end = region
     strands = tuple(bw_fnames)
     chrom_sites = None
     if strand_anchors is None:
-        strand_anchors, chrom_sites = _provider_anchor_arrays(
-            motif_site_provider,
-            chrom,
-            strands,
-            keep_sites=keep_sites,
-            isolate_fasta=isolate_fasta_provider,
-        )
+        if end is None:
+            strand_anchors, chrom_sites = _provider_anchor_arrays(
+                motif_site_provider,
+                chrom,
+                strands,
+                keep_sites=keep_sites,
+                isolate_fasta=isolate_fasta_provider,
+            )
+        else:
+            strand_anchors, chrom_sites = _provider_region_anchor_arrays(
+                motif_site_provider,
+                chrom,
+                start,
+                end,
+                strands,
+                keep_sites=keep_sites,
+                isolate_fasta=isolate_fasta_provider,
+            )
     n_jobs = numba_threads if numba_threads is not None else 1
     corrected = {}
     for strand in strands:
-        corrected[strand] = _correct_strand_signal(
+        positions, values = _correct_strand_signal(
             bw_fnames[strand],
             chrom,
             strand,
@@ -315,9 +392,119 @@ def _correct_chromosome_both_strands(
             target,
             threshold,
             n_jobs,
+            start=start,
+            end=end,
         )
+        if start:
+            positions += start
+        corrected[strand] = (positions, values)
         strand_anchors[strand] = None
-    return chrom, corrected, chrom_sites
+    return region, corrected, chrom_sites
+
+
+def _safe_cut(anchors, near, reach, lo, hi):
+    """The cut ``x`` closest to ``near`` with no anchor in ``(x - reach, x + reach)``.
+
+    ``anchors`` must hold every anchor in ``[lo, hi)`` (sorted); anchors
+    outside that range are unknown, so ``x`` is kept within
+    ``[lo + reach, hi - reach]``. Returns ``None`` when there is no such cut.
+    """
+    pts = np.concatenate(([lo], anchors, [hi])).astype(np.int64)
+    left = pts[:-1] + reach
+    right = pts[1:] - reach
+    ok = left <= right
+    if not ok.any():
+        return None
+    x = np.clip(near, left[ok], right[ok])
+    return int(x[np.argmin(np.abs(x - near))])
+
+
+def plan_chunks(length, chunk_size, anchors_near, reach, window=1 << 15):
+    """Split ``[0, length)`` into chunks that can be corrected independently.
+
+    A site reads and writes only ``[anchor - reach, anchor + reach)``, with
+    ``reach = max(source, target)``, and sites closer than
+    ``source + target <= 2 * reach`` are merged into one cluster. So a cut
+    ``x`` with no anchor of any pass or strand in ``(x - reach, x + reach)``
+    separates the two sides completely, and correcting each chunk on its own
+    gives the same result as correcting the whole chromosome (up to the
+    random draws). Cuts are placed near ``chunk_size`` spacing;
+    ``anchors_near(lo, hi)`` returns the sorted anchors in ``[lo, hi)``. A
+    boundary with no safe cut within about 4 Mb is dropped (its chunks merge).
+    Returns ``[(start, end), ...]``; ``chunk_size`` of 0 or ``None`` gives one
+    chunk.
+    """
+    if not chunk_size or length <= chunk_size:
+        return [(0, length)]
+    n_chunks = -(-length // chunk_size)
+    cuts = [0]
+    for i in range(1, n_chunks):
+        near = (i * length) // n_chunks
+        cut = None
+        w = window
+        while cut is None and w <= 1 << 22:
+            lo, hi = max(0, near - w), min(length, near + w)
+            cut = _safe_cut(anchors_near(lo, hi), near, reach, lo, hi)
+            w *= 4
+        if cut is not None and cuts[-1] < cut < length:
+            cuts.append(cut)
+    cuts.append(length)
+    return list(zip(cuts[:-1], cuts[1:]))
+
+
+def _fasta_anchors_near(provider, chrom):
+    """``anchors_near`` for :func:`plan_chunks`: all strands and specs, from the FASTA."""
+
+    def anchors_near(lo, hi):
+        spec_starts = provider.starts_for_region(
+            chrom, lo - provider.max_motif_length, hi, strands=("+", "-")
+        )
+        parts = []
+        for spec, starts in zip(provider.motif_specs, spec_starts):
+            parts.append(starts["+"])
+            parts.append(starts["-"] + len(spec.motif))
+        anchors = np.unique(np.concatenate(parts))
+        return anchors[(anchors >= lo) & (anchors < hi)]
+
+    return anchors_near
+
+
+def _sorted_anchors_near(strand_anchors):
+    """``anchors_near`` for :func:`plan_chunks` from in-memory per-pass anchor arrays."""
+    anchors = np.unique(
+        np.concatenate(
+            [np.empty(0, dtype=np.int64)]
+            + [a.astype(np.int64) for arrays in strand_anchors.values() for a in arrays]
+        )
+    )
+
+    def anchors_near(lo, hi):
+        return anchors[np.searchsorted(anchors, lo) : np.searchsorted(anchors, hi)]
+
+    return anchors_near
+
+
+def _slice_anchors(strand_anchors, start, end):
+    """Per-pass anchors in ``[start, end)``, relative to ``start``."""
+    return {
+        strand: [
+            (a[(a >= start) & (a < end)] - start).astype(np.int32) for a in arrays
+        ]
+        for strand, arrays in strand_anchors.items()
+    }
+
+
+def _concat_sites(chunk_sites):
+    """Join per-chunk ``starts_for_region`` sites (in order) into one chromosome's."""
+    if any(sites is None for sites in chunk_sites):
+        return None
+    return [
+        {
+            strand: np.concatenate([sites[i][strand] for sites in chunk_sites])
+            for strand in chunk_sites[0][i]
+        }
+        for i in range(len(chunk_sites[0]))
+    ]
 
 
 def _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider):
@@ -333,11 +520,11 @@ def _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider):
 def _run_chromosomes(
     task, task_args, chroms, chrom_workers, worker_backend, verbose, desc, on_result
 ):
-    """Run ``task(chrom, *args)`` per chromosome; hand results over in ``chroms`` order.
+    """Run ``task(key, *task_args[key])`` per key; hand results over in ``chroms`` order.
 
-    ``on_result(result)`` is called for each chromosome's result as soon as it
-    and every chromosome before it have finished, so output can be streamed
-    in order while later chromosomes are still running.
+    Keys are chromosomes or ``(chrom, start, end)`` regions. ``on_result(result)``
+    is called for each key's result as soon as it and every key before it have
+    finished, so output can be streamed in order while later keys still run.
     """
     if chrom_workers == 1:
         for chrom in tqdm.tqdm(chroms, disable=not verbose, desc=desc):
@@ -482,6 +669,19 @@ def _correct_chromosome_task(chrom, bw_fname, *args):
     return _correct_chromosome(bw_fname, chrom, *args)
 
 
+DEFAULT_CHUNK_SIZE = 10_000_000
+
+
+def _signal_lengths(in_bw_fnames, chroms):
+    """Per-chromosome signal length shared by both input bigWigs, or None if they differ."""
+    sizes = [bigwig_chrom_sizes(fname) for fname in in_bw_fnames.values()]
+    lengths = {}
+    for chrom in chroms:
+        found = {int(s[chrom]) for s in sizes if chrom in s}
+        lengths[chrom] = found.pop() if len(found) == 1 else None
+    return lengths
+
+
 def correct_bigwigs(
     in_bw_fnames,
     out_bw_fnames,
@@ -496,15 +696,19 @@ def correct_bigwigs(
     worker_backend="thread",
     numba_threads=None,
     write_jobs=None,
+    chunk_size=DEFAULT_CHUNK_SIZE,
     verbose=True,
 ):
-    """Correct both strands in one pass per chromosome and stream them to bigWigs.
+    """Correct both strands in one pass and stream them to bigWigs.
 
-    Each chromosome is handled by one task that locates (or looks up) its
-    motif sites for both strands, then reads, corrects and sparsifies each
-    strand in turn. Finished chromosomes are written to both output bigWigs
-    in ``chrom_sizes`` order as soon as every earlier chromosome is done, so
-    only the sparse results of chromosomes waiting their turn are held.
+    Chromosomes longer than ``chunk_size`` are split into chunks at cuts that
+    no site's reads or writes cross (see :func:`plan_chunks`), so chunks are
+    corrected independently and large chromosomes spread across workers.
+    Each task locates (or looks up) its motif sites for both strands, then
+    reads, corrects and sparsifies each strand in turn. Finished chromosomes
+    are written to both output bigWigs in ``chrom_sizes`` order as soon as
+    every earlier chunk is done, so only the sparse results of chunks waiting
+    their turn are held.
 
     Parameters
     ----------
@@ -514,13 +718,18 @@ def correct_bigwigs(
     chrom_sizes : sequence of (str, int)
         Chromosomes to correct, in output order, and their lengths.
     bed6_fname, motif_beds, motif_site_provider
-        Motif sites, as in :func:`kmer_resample`.
+        Motif sites, as in :func:`kmer_resample`. Chunking needs BED tables or
+        a provider with ``starts_for_region`` (``FastaMotifSiteProvider``);
+        other providers get whole chromosomes.
     source, target, threshold : int
         Parameters forwarded to ``correct_kmers``.
     chrom_workers, worker_backend, numba_threads, verbose
         As in :func:`kmer_resample`.
     write_jobs : int, optional
         Compression threads per output bigWig. Defaults to the thread budget.
+    chunk_size : int, optional
+        Target chunk length in bases. ``0`` or ``None`` corrects whole
+        chromosomes.
     """
     if worker_backend not in {"thread", "process"}:
         raise ValueError("worker_backend must be 'thread' or 'process'")
@@ -536,20 +745,53 @@ def correct_bigwigs(
     index = (
         bed_anchor_index(motif_beds, chroms) if motif_site_provider is None else None
     )
-    task_args = {
-        chrom: (
-            in_bw_fnames,
-            None if index is None else index.pop(chrom),
-            motif_site_provider,
-            source,
-            target,
-            threshold,
-            parallel,
-            numba_threads,
-            _needs_bed6_sites(motif_site_provider, chrom),
-        )
-        for chrom in chroms
-    }
+    can_split = index is not None or hasattr(motif_site_provider, "starts_for_region")
+    lengths = (
+        _signal_lengths(in_bw_fnames, chroms)
+        if chunk_size and can_split
+        else dict.fromkeys(chroms)
+    )
+    reach = max(source, target)
+
+    regions = []
+    task_args = {}
+    last_region = {}
+    for chrom in chroms:
+        length = lengths[chrom]
+        chunks = [(0, None)]
+        if length is not None and length > chunk_size:
+            anchors_near = (
+                _fasta_anchors_near(motif_site_provider, chrom)
+                if index is None
+                else _sorted_anchors_near(index[chrom])
+            )
+            planned = plan_chunks(length, chunk_size, anchors_near, reach)
+            if len(planned) > 1:
+                chunks = planned
+        keep_sites = _needs_bed6_sites(motif_site_provider, chrom)
+        chrom_anchors = None if index is None else index.pop(chrom)
+        for start, end in chunks:
+            region = (chrom, start, end)
+            anchors = chrom_anchors
+            if anchors is not None and end is not None:
+                anchors = _slice_anchors(chrom_anchors, start, end)
+            regions.append(region)
+            task_args[region] = (
+                in_bw_fnames,
+                anchors,
+                motif_site_provider,
+                source,
+                target,
+                threshold,
+                parallel,
+                numba_threads,
+                keep_sites,
+            )
+        last_region[chrom] = regions[-1]
+        del chrom_anchors
+
+    if verbose and len(regions) > len(chroms):
+        print(f"Split {len(chroms)} chromosomes into {len(regions)} chunks.")
 
     with contextlib.ExitStack() as stack:
         writers = {
@@ -558,28 +800,39 @@ def correct_bigwigs(
             )
             for strand in strands
         }
+        buffered = {strand: [] for strand in strands}
+        buffered_sites = []
 
         def write(result):
-            chrom, corrected, chrom_sites = result
-            _append_motif_sites_for_chrom(motif_site_provider, chrom, chrom_sites)
+            region, corrected, sites = result
+            chrom = region[0]
             for strand in strands:
-                write_chrom_intervals(writers[strand], chrom, *corrected[strand])
+                buffered[strand].append(corrected[strand])
+            buffered_sites.append(sites)
+            if region != last_region[chrom]:
+                return
+            chrom_sites = (
+                buffered_sites[0] if len(buffered_sites) == 1 else _concat_sites(buffered_sites)
+            )
+            _append_motif_sites_for_chrom(motif_site_provider, chrom, chrom_sites)
+            buffered_sites.clear()
+            for strand in strands:
+                parts = buffered[strand]
+                positions = np.concatenate([p for p, _ in parts])
+                values = np.concatenate([v for _, v in parts])
+                parts.clear()
+                write_chrom_intervals(writers[strand], chrom, positions, values)
 
         _run_chromosomes(
-            _both_strands_task,
+            _correct_region_both_strands,
             task_args,
-            chroms,
+            regions,
             chrom_workers,
             worker_backend,
             verbose,
             "Correcting kmers on both strands",
             write,
         )
-
-
-def _both_strands_task(chrom, bw_fnames, *args):
-    """``_correct_chromosome_both_strands`` with ``chrom`` first."""
-    return _correct_chromosome_both_strands(bw_fnames, chrom, *args)
 
 
 def parse_args():
@@ -760,6 +1013,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--chunk-size",
+        metavar="BP",
+        type=parse_non_negative_int,
+        default=DEFAULT_CHUNK_SIZE,
+        help=(
+            "Split chromosomes longer than this into chunks corrected in "
+            "parallel. Cuts are placed where no motif site's window crosses "
+            "them, so output is unchanged. 0 corrects whole chromosomes."
+        ),
+    )
+    parser.add_argument(
         "--worker-backend",
         choices=["process", "thread"],
         default="process",
@@ -846,5 +1110,6 @@ def run_correction():
         worker_backend=args.worker_backend,
         numba_threads=numba_threads,
         write_jobs=thread_budget(),
+        chunk_size=args.chunk_size,
         verbose=args.verbose,
     )

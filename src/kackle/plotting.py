@@ -230,13 +230,17 @@ def chrom_window_sums(before_values, after_values, centers, flank, absolute=Fals
 STRAND_ABSOLUTE = {"+": False, "-": True}
 
 
-def _provider_sites(provider, chrom):
+def _provider_sites(provider, chrom, region=None):
     """``{strand: starts}`` for one chromosome, pooled over motif specs.
 
-    Uses the provider's start arrays directly, so no BED6 tables are built.
-    Providers with only ``for_chrom`` go through their tables.
+    With ``region=(start, end)``, only sites starting in ``[start, end)``
+    (needs ``starts_for_region``). Uses the provider's start arrays directly,
+    so no BED6 tables are built. Providers with only ``for_chrom`` go
+    through their tables.
     """
-    if not hasattr(provider, "starts_for_chrom"):
+    if region is not None:
+        spec_starts = provider.starts_for_region(chrom, *region)
+    elif not hasattr(provider, "starts_for_chrom"):
         beds = provider.for_chrom(chrom)
         spec_starts = [
             {s: bed.loc[bed.strand == s, "start"].to_numpy(np.int64) for s in STRAND_ABSOLUTE}
@@ -255,16 +259,23 @@ def _provider_sites(provider, chrom):
     }
 
 
-def _chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank):
-    """Sum one chromosome for both strands. Runs in a worker.
+def _chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank, region=None):
+    """Sum one chromosome, or one chunk of it, for both strands. Runs in a worker.
 
     ``chrom_sites`` maps strand to motif-start arrays (BED mode); otherwise
-    ``provider`` locates this chromosome's sites here, so FASTA-mode motif
-    location runs in parallel and no genome-wide site table is built. To keep
-    the peak low, only one dense track is in memory at a time.
+    ``provider`` locates the sites here, so FASTA-mode motif location runs in
+    parallel and no genome-wide site table is built. To keep the peak low,
+    only one dense track is in memory at a time.
+
+    ``region=(start, end)`` sums only the sites that start in
+    ``[start, end)`` (``chrom_sites`` must already be limited to those), and
+    reads only ``[start - flank, end + flank)`` of each track, clipped to the
+    chromosome. Every window of such a site lies inside that range, so
+    windows are clipped at the chromosome ends exactly as for a whole
+    chromosome, and chunk sums add up to the chromosome's.
     """
     if chrom_sites is None:
-        chrom_sites = _provider_sites(provider, chrom)
+        chrom_sites = _provider_sites(provider, chrom, region)
     out = {}
     for strand, absolute in STRAND_ABSOLUTE.items():
         before_fname, after_fname = bigwigs[strand]
@@ -276,18 +287,69 @@ def _chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank):
         if chrom not in before_sizes or chrom not in after_sizes:
             continue  # chromosome missing from this strand's bigWig pair
         length = min(int(before_sizes[chrom]), int(after_sizes[chrom]))
-        centers = np.sort(np.asarray(centers, dtype=np.int64))
-        counts = _window_counts(centers, length, flank)
-        site_count = _site_count_vector(centers, length, flank)
+        read_from, read_to = 0, length
+        if region is not None:
+            read_from = min(length, max(0, region[0] - flank))
+            read_to = max(read_from, min(length, region[1] + flank))
+        centers = np.sort(np.asarray(centers, dtype=np.int64)) - read_from
+        span = read_to - read_from
+        counts = _window_counts(centers, span, flank)
+        site_count = _site_count_vector(centers, span, flank)
         sums = []
         for fname in (before_fname, after_fname):
-            values = read_chrom_values(fname, chrom)
-            signal = _dense_signal(values, length, absolute, in_place=True)
+            if region is None:
+                values = read_chrom_values(fname, chrom)
+            else:
+                values = read_chrom_values(fname, chrom, start=read_from, end=read_to)
+            signal = _dense_signal(values, span, absolute, in_place=True)
             sums.append(_track_window_sum(signal, site_count, flank))
             del values, signal
         del site_count
         out[strand] = (sums[0], sums[1], counts)
     return out
+
+
+DEFAULT_CHUNK_SIZE = 10_000_000
+
+
+def _chunk_bounds(length, chunk_size):
+    """Even ``(start, end)`` chunks of at most about ``chunk_size``; ends are open.
+
+    The first chunk starts at ``-inf`` and the last ends at ``+inf`` (as
+    ``None``), so every site, even one outside ``[0, length)``, has a chunk.
+    """
+    if not chunk_size or length <= chunk_size:
+        return [None]
+    n_chunks = -(-length // chunk_size)
+    cuts = [(i * length) // n_chunks for i in range(n_chunks + 1)]
+    bounds = list(zip(cuts[:-1], cuts[1:]))
+    bounds[0] = (None, bounds[0][1])
+    bounds[-1] = (bounds[-1][0], None)
+    return bounds
+
+
+def _owned_sites(chrom_sites, bound):
+    lo, hi = bound
+    out = {}
+    for strand, starts in chrom_sites.items():
+        starts = np.asarray(starts, dtype=np.int64)
+        keep = np.ones(starts.shape[0], dtype=bool)
+        if lo is not None:
+            keep &= starts >= lo
+        if hi is not None:
+            keep &= starts < hi
+        out[strand] = starts[keep]
+    return out
+
+
+def _chrom_length(bigwigs, chrom):
+    lengths = [
+        int(sizes[chrom])
+        for pair in bigwigs.values()
+        for sizes in map(bigwig_chrom_sizes, pair)
+        if chrom in sizes
+    ]
+    return max(lengths, default=0)
 
 
 def metaplot_profiles(
@@ -298,6 +360,7 @@ def metaplot_profiles(
     provider=None,
     chrom_workers=1,
     worker_backend="process",
+    chunk_size=DEFAULT_CHUNK_SIZE,
 ):
     """Return ``{strand: (x, before_mean, after_mean, counts)}`` over ``chroms``.
 
@@ -313,13 +376,17 @@ def metaplot_profiles(
         ``{chrom: {strand: starts}}``. Exactly one of ``sites`` and
         ``provider`` must be given.
     provider : FastaMotifSiteProvider, optional
-        Locates sites per chromosome inside each worker.
+        Locates sites per chromosome (or chunk) inside each worker.
     chrom_workers : int
-        Chromosomes processed concurrently. Each worker holds one
-        chromosome's sequence, motif sites, two dense tracks and a site-count
-        vector: peak about 7 GB in FASTA mode on hg38 (chr1).
+        Chunks processed concurrently. Each worker holds one chunk's
+        sequence, motif sites, two dense tracks and a site-count vector.
     worker_backend : {"process", "thread"}
         Executor used when ``chrom_workers > 1``.
+    chunk_size : int, optional
+        Split chromosomes longer than this many bases into chunks, so large
+        chromosomes spread across workers. ``0`` or ``None`` sums whole
+        chromosomes. Providers without ``starts_for_region`` get whole
+        chromosomes.
     """
     if (sites is None) == (provider is None):
         raise ValueError("pass exactly one of sites or provider")
@@ -328,13 +395,26 @@ def metaplot_profiles(
         strand: [np.zeros(width), np.zeros(width), np.zeros(width, dtype=np.int64)]
         for strand in STRAND_ABSOLUTE
     }
+    can_split = sites is not None or hasattr(provider, "starts_for_region")
 
     def tasks():
         for chrom in chroms:
             chrom_sites = None if sites is None else sites.get(chrom)
             if sites is not None and chrom_sites is None:
                 continue
-            yield chrom, chrom_sites
+            bounds = [None]
+            if chunk_size and can_split:
+                bounds = _chunk_bounds(_chrom_length(bigwigs, chrom), chunk_size)
+            for bound in bounds:
+                if bound is None:
+                    yield chrom, chrom_sites, None
+                    continue
+                region = (
+                    -flank if bound[0] is None else bound[0],
+                    np.iinfo(np.int64).max // 2 if bound[1] is None else bound[1],
+                )
+                part = None if chrom_sites is None else _owned_sites(chrom_sites, bound)
+                yield chrom, part, region
 
     def add(result):
         for strand, parts in result.items():
@@ -342,8 +422,8 @@ def metaplot_profiles(
                 total += part
 
     if chrom_workers <= 1:
-        for chrom, chrom_sites in tasks():
-            add(_chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank))
+        for chrom, chrom_sites, region in tasks():
+            add(_chrom_profile_task(chrom, bigwigs, chrom_sites, provider, flank, region))
     else:
         if worker_backend == "process":
             # spawn, not fork: the parent may already run figwig/numba threads,
@@ -357,9 +437,15 @@ def metaplot_profiles(
         with executor:
             futures = [
                 executor.submit(
-                    _chrom_profile_task, chrom, bigwigs, chrom_sites, provider, flank
+                    _chrom_profile_task,
+                    chrom,
+                    bigwigs,
+                    chrom_sites,
+                    provider,
+                    flank,
+                    region,
                 )
-                for chrom, chrom_sites in tasks()
+                for chrom, chrom_sites, region in tasks()
             ]
             for future in futures:
                 add(future.result())
@@ -468,6 +554,16 @@ def write_profile_pngs(profiles, out_prefix):
     return outputs
 
 
+def _non_negative_int(value):
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
+
+
 def _positive_int_or_auto(value):
     from kackle.correction import parse_positive_int_or_auto
 
@@ -566,9 +662,18 @@ def parse_metaplot_args():
         type=_positive_int_or_auto,
         default="auto",
         help=(
-            "Chromosomes processed concurrently (motif location and summing). "
-            "FASTA mode on hg38 peaks at about 7 GB per worker (chr1). "
-            "auto uses min(chromosomes, CPUs, 4)."
+            "Chromosome chunks processed concurrently (motif location and "
+            "summing). auto uses min(chromosomes, CPUs, 4)."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-size",
+        metavar="BP",
+        type=_non_negative_int,
+        default=DEFAULT_CHUNK_SIZE,
+        help=(
+            "Split chromosomes longer than this into chunks summed in "
+            "parallel. 0 sums whole chromosomes."
         ),
     )
     parser.add_argument(
@@ -629,6 +734,7 @@ def run_metaplot():
         provider=provider,
         chrom_workers=resolve_chrom_workers(args.chrom_workers, max(1, len(chroms))),
         worker_backend=args.worker_backend,
+        chunk_size=args.chunk_size,
     )
     outputs = write_profile_pngs(profiles, args.out_prefix)
     tsv_fname = write_profile_tsv(profiles, f"{args.out_prefix}.tsv")
