@@ -548,7 +548,7 @@ def parse_metaplot_args():
     )
     parser.add_argument(
         "--motif-match-backend",
-        choices=["auto", "numba", "numpy", "python", "ahocorasick"],
+        choices=["auto", "numba", "python", "ahocorasick"],
         default="auto",
         help="Motif matcher for --fasta mode (see kackle --help); all give identical sites.",
     )

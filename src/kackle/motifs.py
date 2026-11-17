@@ -29,8 +29,8 @@ import pandas as pd
 DNA_ALPHABET = ("A", "C", "G", "T")
 RC_TABLE = str.maketrans("ACGTNacgtn", "TGCANtgcan")
 BED6_COLUMNS = ["chrom", "start", "end", "name", "score", "strand"]
-MatchBackend = Literal["auto", "numba", "numpy", "python"]
-MATCH_BACKENDS = ("auto", "numba", "numpy", "python")
+MatchBackend = Literal["auto", "numba", "python"]
+MATCH_BACKENDS = ("auto", "numba", "python")
 STRANDS = ("+", "-")
 
 
@@ -118,10 +118,15 @@ def _sort_bed(rows):
 def resolve_match_backend(match_backend):
     """Resolve a motif matching backend name.
 
-    ``auto`` (the default) uses the numba kernel, or the NumPy one when numba
-    JIT is disabled (``NUMBA_DISABLE_JIT=1``), where the numba kernel would run
-    as slow interpreted Python. ``ahocorasick`` is accepted as a deprecated
-    alias for ``auto``; ahocorasick-rs is no longer used.
+    ``auto`` (the default) uses the numba kernel. When numba JIT is disabled
+    (``NUMBA_DISABLE_JIT=1``, e.g. the compare-versions exact mode or
+    debugging), it uses the ``python`` matcher instead: the uncompiled kernel
+    runs as interpreted loops, about 6 s/Mb per motif and strand. The python
+    matcher is still much slower than compiled numba, and its cost grows with
+    the number of mismatch variants (on 5 Mb, one strand: TGGAA:1 0.25 s vs
+    numba 0.011 s; an 8-mer with 2 mismatches 2.5 s vs 0.017 s), so it is
+    meant for small inputs. ``ahocorasick`` is accepted as a deprecated alias
+    for ``auto``; ahocorasick-rs is no longer used.
     """
     if match_backend == "ahocorasick":
         warnings.warn(
@@ -138,7 +143,7 @@ def resolve_match_backend(match_backend):
     if match_backend == "auto":
         from numba import config
 
-        return "numpy" if config.DISABLE_JIT else "numba"
+        return "python" if config.DISABLE_JIT else "numba"
     return match_backend
 
 
@@ -157,24 +162,13 @@ def _sequence_bytes(sequence):
     return np.frombuffer(sequence.encode("ascii", "replace"), dtype=np.uint8)
 
 
-def _numpy_window_starts(sequence_bytes, pattern, max_mismatches):
-    """Vectorized NumPy equivalent of ``computation.motif_window_starts``."""
-    k = len(pattern)
-    n_windows = sequence_bytes.size - k + 1
-    if n_windows <= 0:
-        return np.empty(0, dtype=np.int64)
-    upper = sequence_bytes & np.uint8(0xDF)
-    is_acgt = np.isin(upper, np.frombuffer(b"ACGT", dtype=np.uint8))
-    valid = np.ones(n_windows, dtype=bool)
-    matches = np.zeros(n_windows, dtype=np.uint8 if k < 256 else np.uint16)
-    for j, base in enumerate(pattern.encode("ascii")):
-        valid &= is_acgt[j : j + n_windows]
-        matches += upper[j : j + n_windows] == base
-    return np.flatnonzero(valid & (matches >= k - max_mismatches)).astype(np.int64)
-
-
 def _python_window_starts(sequence_upper, pattern, max_mismatches):
-    """Reference matcher: exact ``str.find`` over every A/C/G/T mismatch variant."""
+    """Reference matcher: exact ``str.find`` over every A/C/G/T mismatch variant.
+
+    One pass per variant, so cost grows with ``mismatch_variants`` (1 for
+    TGG:0, 16 for TGGAA:1, 277 for an 8-mer with 2 mismatches). Used as the
+    independent check on the numba kernel and as the no-JIT fallback.
+    """
     found = set()
     for variant in mismatch_variants(pattern, max_mismatches):
         start = sequence_upper.find(variant)
@@ -188,8 +182,6 @@ def _window_starts(encoded, pattern, max_mismatches, match_backend):
     """Dispatch to a matcher. ``encoded`` is uint8 bytes, or an uppercase str for python."""
     if match_backend == "python":
         return _python_window_starts(encoded, pattern, max_mismatches)
-    if match_backend == "numpy":
-        return _numpy_window_starts(encoded, pattern, max_mismatches)
     from kackle.computation import motif_window_starts
 
     return motif_window_starts(
@@ -229,8 +221,8 @@ def locate_motif_starts(
         Search the reverse complement too. Ignored when ``strands`` is given.
     strands : iterable of {"+", "-"}, optional
         Strands to search, e.g. ``("+",)`` when only one is needed.
-    match_backend : {"auto", "numba", "numpy", "python"}
-        Matching engine. All give identical results.
+    match_backend : {"auto", "numba", "python"}
+        Matching engine. Both give identical results.
     """
     motif = _validate_motif(motif)
     if max_mismatches < 0:
@@ -301,7 +293,7 @@ def locate_motif_in_sequence(
         Maximum Hamming substitutions allowed.
     both_strands : bool
         If true, also report reverse-strand hits (``"-"`` rows).
-    match_backend : {"auto", "numba", "numpy", "python"}
+    match_backend : {"auto", "numba", "python"}
         Matching engine; see :func:`locate_motif_starts`.
 
     Returns

@@ -232,6 +232,9 @@ def _window_matches(sequence, start, pattern, max_mismatches):
 def motif_window_starts(sequence, pattern, max_mismatches):
     """Return sorted starts of windows that match ``pattern`` (see ``_window_matches``).
 
+    ``kackle.motifs._python_window_starts`` is the independent reference this
+    is tested against, and the fallback when numba JIT is disabled.
+
     Parameters
     ----------
     sequence : numpy.ndarray of uint8

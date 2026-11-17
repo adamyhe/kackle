@@ -481,12 +481,12 @@ def parse_args():
     )
     parser.add_argument(
         "--motif-match-backend",
-        choices=["auto", "numba", "numpy", "python", "ahocorasick"],
+        choices=["auto", "numba", "python", "ahocorasick"],
         default="auto",
         help=(
-            "Motif matcher for --fasta mode. All give identical sites. auto "
-            "uses numba (numpy if numba JIT is disabled); python is a slow "
-            "reference that runs str.find per mismatch variant. ahocorasick "
+            "Motif matcher for --fasta mode; both give identical sites. auto "
+            "uses numba, or python when numba JIT is disabled. python runs "
+            "str.find per mismatch variant (a slower reference). ahocorasick "
             "is a deprecated alias for auto."
         ),
     )

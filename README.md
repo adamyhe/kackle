@@ -43,14 +43,13 @@ kackle -i plus.bw -I minus.bw -f genome.fa -o out.plus.bw -O out.minus.bw -c chr
 FASTA mode locates motif sites one chromosome at a time to avoid materializing
 whole-genome BED tables for common short motifs. It reads the FASTA through
 `pyfaidx`, which writes a samtools-compatible `.fai` index next to the FASTA
-on first use (uncompressed or bgzip-compressed FASTA only), and matches motifs
-with `ahocorasick-rs` by default:
-
-```bash
-kackle -i plus.bw -I minus.bw -f genome.fa \
-  --motif-match-backend ahocorasick \
-  -o out.plus.bw -O out.minus.bw -c chrom.sizes
-```
+on first use (uncompressed or bgzip-compressed FASTA only). Motifs are
+matched with a numba kernel. A window matches `KMER:N` when every base is
+A/C/G/T (any case) and at most `N` differ from the motif, so windows
+containing `N` or IUPAC codes never match. `--motif-match-backend` selects
+`numba` (the default, via `auto`) or `python`, a much slower reference (one
+`str.find` pass per mismatch variant) that `auto` uses only when numba JIT is
+disabled (`NUMBA_DISABLE_JIT=1`). Both return identical sites.
 
 Custom motif order can be supplied with repeated `--motif KMER[:MISMATCHES]` flags.
 To save the generated motif sites while using FASTA mode, add

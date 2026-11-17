@@ -78,7 +78,7 @@ def test_locate_motif_can_skip_reverse_strand(tmp_path):
     assert bed[["start", "strand"]].to_records(index=False).tolist() == [(0, "+")]
 
 
-@pytest.mark.parametrize("backend", ["numba", "numpy", "auto"])
+@pytest.mark.parametrize("backend", ["numba", "auto"])
 def test_locate_motif_in_sequence_backends_match_python(backend):
     sequence = "TGGATGGAAACCATGGAT"
 
@@ -121,7 +121,7 @@ def test_fasta_motif_site_provider_locates_one_chromosome_at_a_time(tmp_path):
     assert tggaa_bed.empty
 
 
-@pytest.mark.parametrize("backend", ["numba", "numpy"])
+@pytest.mark.parametrize("backend", ["numba", "auto"])
 def test_fasta_motif_site_provider_backends_match_python(tmp_path, backend):
     fasta = tmp_path / "genome.fa"
     write_fasta(fasta, [("chr1", "TGGATGGAA"), ("chr2", "ACCATGG")])
@@ -209,7 +209,7 @@ from kackle.motifs import (  # noqa: E402
     resolve_match_backend,
 )
 
-BACKENDS = ["numba", "numpy", "python"]
+BACKENDS = ["numba", "python"]
 
 
 def brute_force_starts(sequence, pattern, max_mismatches):
@@ -256,9 +256,9 @@ def test_numba_kernel_spans_chunk_boundaries():
         sequence[boundary - 2 : boundary + 3] = list("TGGAA")
     sequence = "".join(sequence)
     numba = locate_motif_starts(sequence, "TGGAA", 1, match_backend="numba")
-    numpy = locate_motif_starts(sequence, "TGGAA", 1, match_backend="numpy")
+    python = locate_motif_starts(sequence, "TGGAA", 1, match_backend="python")
     for strand in "+-":
-        np.testing.assert_array_equal(numba[strand], numpy[strand])
+        np.testing.assert_array_equal(numba[strand], python[strand])
     assert {65_534, 131_070, 196_606} <= set(numba["+"].tolist())
 
 
@@ -286,7 +286,16 @@ def test_locate_motif_starts_validates_inputs():
 
 def test_ahocorasick_backend_is_a_deprecated_alias_for_auto():
     with pytest.warns(DeprecationWarning):
-        assert resolve_match_backend("ahocorasick") in {"numba", "numpy"}
+        assert resolve_match_backend("ahocorasick") in {"numba", "python"}
+
+
+def test_auto_backend_falls_back_to_python_when_jit_is_disabled(monkeypatch):
+    from numba import config
+
+    monkeypatch.setattr(config, "DISABLE_JIT", True)
+    assert resolve_match_backend("auto") == "python"
+    monkeypatch.setattr(config, "DISABLE_JIT", False)
+    assert resolve_match_backend("auto") == "numba"
 
 
 def test_bed_from_starts_matches_sorted_row_construction():

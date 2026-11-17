@@ -2,8 +2,8 @@
 
 The benchmark creates a synthetic multi-record FASTA, locates the default
 kackle motifs on the last chromosome with ``FastaMotifSiteProvider.starts_for_chrom``,
-and compares the default numba matcher with the NumPy fallback and the
-pure-Python reference (all read FASTA via pyfaidx). Each backend gets one
+and compares the default numba matcher with the pure-Python reference (both
+read FASTA via pyfaidx). Each backend gets one
 untimed warm-up call, so numba compilation isn't counted, and every backend
 must return identical starts.
 """
@@ -73,7 +73,7 @@ def main() -> None:
         write_fasta(fasta, args.records, args.length)
         chrom = f"chr{args.records}"
         results = []
-        for match_backend in ("numba", "numpy", "python"):
+        for match_backend in ("numba", "python"):
             elapsed, spec_starts = time_provider(
                 fasta, chrom, match_backend, args.repeats
             )
