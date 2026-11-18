@@ -101,23 +101,52 @@ T followed by 7 more adapter bases gives 40×. Of the 16 TGGAA:1 variants, four
 most of what remains is below the 10× threshold: TGGA–TGGAATT sites sit at
 1.6–2.4× their flanks with only about 0.15% flagged.
 
-The plan is to take an adapter sequence and derive the sites from it:
+**Prototype in #14** (`--adapter SEQ`, with base-only resampling):
 
-- `--adapter SEQ` (IUPAC codes allowed, so UMI `N`s act as wildcards). A
-  candidate is a position whose RNA-sense sequence matches the adapter's 5'
-  end for a minimum length with at most a set number of mismatches.
-- A threshold graded by match length, since a long match is almost certainly
-  an artifact.
-- One pass. With base-only resampling, a second pass mostly cleans up the
-  screen's background, so instead the background leaves out every
-  candidate's artifact base. That makes it deterministic and independent of
-  order.
+- IUPAC codes are allowed, so UMI `N`s act as wildcards. A position is a
+  candidate when the RNA-sense sequence that follows matches the adapter's
+  5' end: at least 3 bases with no mismatches, or 5 with one
+  (`--adapter-min-match 3,5`).
+- Longer matches get lower fold thresholds (`--adapter-tiers 8:5,10:3`;
+  shorter matches use `-r`). The tier depends only on match length, not on
+  mismatch count.
+- One pass, in two stages: a plain screen, then a rescreen whose background
+  also leaves out the artifact bases flagged in the first stage. Both read
+  the input, so the result is deterministic and doesn't depend on site order.
+  A first version left every candidate's artifact base out of the
+  background; that flagged more weak sites and pulled the corrected level
+  down by about 0.05.
 - `-k` / `-b` multi-pass stay for other artifact types.
 
-Later: calibrate the tiers per library from the input itself, and report
-artifact signal by match class. The artifact base sits just before the
-look-alike in RNA orientation, which holds for 3'-end tracks like these;
-other library layouts would need an option for which side the adapter is on.
+On the 6 samples, the two-stage screen matches the two-pass base mode
+(TGG:0 → TGGAA:1) and runs in one pass. Ratio = artifact base / mean at
+20–50 bp from the motif:
+
+| | two-pass base | adapter, two-stage |
+|---|---|---|
+| TGG | 0.91–1.05 | 0.90–1.03 |
+| TGGAA | 0.80–0.89 | 0.81–0.90 |
+| signal removed | 22.30–35.14% | +0.02–0.05 points |
+
+Tiers bring one-mismatch sites matching 8–10 adapter bases to 0.32–0.58,
+close to their neighbouring classes; two-pass leaves them at 0.65–1.29.
+
+Open:
+
+- **Exact TGGA and TGGAA matches still sit at about 1.5–1.7×** (about 95k
+  reads per sample) in every mode, because their 4–5-base matches stay in
+  the 10× tier. A plain `4:7` length tier brings them to 1.1–1.2, but it also
+  lowers the threshold for one-mismatch 5–7-base matches. Those carry almost
+  no artifact, so it over-corrects: they drop to 0.22–0.43, and the TGGAA
+  metaplot drops to about 0.6. The next step to try is a tier that also
+  limits mismatches (e.g. `4/0:7`). Some of the remainder may be
+  spread over many sites only a few times above background, which no per-site
+  threshold can remove cleanly.
+- Calibrate the tiers per library from the input itself, and report artifact
+  signal by match class.
+- The artifact base sits just before the look-alike in RNA orientation,
+  which holds for 3'-end tracks like these. Other library layouts would need
+  an option for which side the adapter is on.
 
 ## Performance
 
