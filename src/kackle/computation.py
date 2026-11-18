@@ -263,13 +263,19 @@ def correct_adapter_sites(
 
     Each anchor's artifact base (plus: ``anchor - 1``; minus: ``anchor``) is
     compared with the mean of its ``[anchor - source, anchor + source)``
-    neighborhood, leaving out the artifact bases of *every* candidate (flagged
-    or not). The screen is therefore deterministic and independent of site
-    order: no spike at a nearby candidate inflates the background. A site is
-    flagged when its artifact base exceeds ``thresholds[i]`` times that mean,
-    and its artifact base is replaced with a Poisson draw with that mean.
-    Every other base keeps its input value. Each site writes only its own
-    artifact base and reads only the input, so the loop has no races.
+    neighborhood in two stages, both on the input signal:
+
+    1. a plain screen: the background is the rest of the neighborhood, and a
+       site is flagged when its artifact base exceeds ``thresholds[i]`` times
+       that mean;
+    2. a rescreen whose background also leaves out the artifact bases of the
+       sites flagged in stage 1, so a nearby spike no longer hides a site.
+       Candidates that stage 1 did not flag stay in the background.
+
+    A site flagged in either stage has its artifact base replaced with a
+    Poisson draw with the stage-2 mean. Every other base keeps its input value.
+    Each site writes only its own artifact base and reads only the input, so
+    the result does not depend on site order and the loops have no races.
     ``starts`` must not repeat an anchor.
     """
     out_vec = chromosome_signal_vector.copy()
@@ -278,8 +284,24 @@ def correct_adapter_sites(
         return out_vec
     length = chromosome_signal_vector.shape[0]
     offset = 1 if strand == "+" else 0
-    art = np.sort(starts.astype(np.int64)) - offset
+    # Stage 1: plain screen.
+    flag1 = np.zeros(n, dtype=np.bool_)
+    for i in prange(n):
+        anchor = np.int64(starts[i])
+        idx = anchor - offset
+        lo = anchor - source
+        hi = anchor + source
+        if lo < 0 or hi > length:
+            continue
+        total = 0.0
+        for j in range(lo, hi):
+            total += chromosome_signal_vector[j]
+        mean = (total - chromosome_signal_vector[idx]) / (hi - lo - 1)
+        if chromosome_signal_vector[idx] > thresholds[i] * mean:
+            flag1[i] = True
+    art = np.sort(starts[flag1].astype(np.int64)) - offset
     m = art.shape[0]
+    # Stage 2: rescreen without stage-1 flagged artifact bases.
     for i in prange(n):
         anchor = np.int64(starts[i])
         idx = anchor - offset
@@ -293,14 +315,14 @@ def correct_adapter_sites(
         for j in range(lo, hi):
             while k < m and art[k] < j:
                 k += 1
-            if k < m and art[k] == j:
+            if j == idx or (k < m and art[k] == j):
                 continue
             total += chromosome_signal_vector[j]
             count += 1
         if count == 0:
             continue
         mean = total / count
-        if chromosome_signal_vector[idx] > thresholds[i] * mean:
+        if flag1[i] or chromosome_signal_vector[idx] > thresholds[i] * mean:
             out_vec[idx] = np.random.poisson(mean)
     return out_vec
 

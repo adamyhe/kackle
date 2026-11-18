@@ -105,22 +105,27 @@ def test_parsers_and_validation(tmp_path):
 
 
 @pytest.mark.parametrize("strand", ["+", "-"])
-def test_single_pass_screen_excludes_all_candidates(strand):
+def test_single_pass_screen_rescreens_without_flagged_sites(strand):
     off = 1 if strand == "+" else 0
     signal = np.ones(200, dtype=np.int32)
     starts = np.array([60, 63, 66, 120], dtype=np.int32)
     art = starts - off
-    signal[art[:3]] = [500, 500, 2]  # third candidate is not a spike
+    # 100 fails the plain screen next to 500 (mean ~27) but passes once the
+    # 500 is left out; 9 is a candidate that is never flagged.
+    signal[art] = [500, 100, 9, 4]
     thr = np.full(4, 10.0)
-    draws = np.array([correct_adapter_sites(signal, starts, thr, 10, strand) for _ in range(1000)])
+    draws = np.array([correct_adapter_sites(signal, starts, thr, 10, strand) for _ in range(2000)])
     changed = np.flatnonzero((draws != signal).any(0))
     assert set(changed) == set(art[:2])
-    # Means leave out every candidate's artifact base: flat background of 1.
-    assert abs(draws[:, art[:2]].mean() - 1.0) < 0.1
-    # Per-site thresholds: 2 > 1.5 * 1 flags the third site.
-    thr[2] = 1.5
-    flagged = np.array([correct_adapter_sites(signal, starts, thr, 10, strand)[art[2]] for _ in range(200)])
-    assert flagged.mean() < 1.5
+    # Only the 500 is flagged in stage 1, so the 100's stage-2 background
+    # leaves it out but keeps the unflagged 9: (9 + 17 ones) / 18. The 500's
+    # background still holds the 100 (as after a TGG pass): (100 + 9 + 17) / 19.
+    assert abs(draws[:, art[1]].mean() - 26 / 18) < 0.1
+    assert abs(draws[:, art[0]].mean() - 126 / 19) < 0.3
+    # Per-site thresholds: the lone 4 passes at 3x but not at 10x.
+    thr[3] = 3.0
+    flagged = np.array([correct_adapter_sites(signal, starts, thr, 10, strand)[art[3]] for _ in range(200)])
+    assert flagged.mean() < 2
 
 
 def spiky_inputs(tmp_path, provider, chrom_sizes):
