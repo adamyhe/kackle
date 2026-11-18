@@ -5,8 +5,8 @@ real fragment that resemble the 3' adapter. The read then ends on the base
 just before the look-alike (the artifact base). A position is a candidate
 when the RNA-sense sequence starting there matches the adapter's 5' end for
 long enough (see :func:`kackle.computation.adapter_match_lengths`). The match
-length sets the site's screening threshold, since a longer match is a
-stronger artifact.
+length, and optionally its number of mismatches, set the site's screening
+threshold, since a longer or cleaner match is a stronger artifact.
 
 :class:`AdapterSiteProvider` exposes the same ``starts_for_chrom`` /
 ``starts_for_region`` interface as :class:`kackle.motifs.FastaMotifSiteProvider`,
@@ -28,8 +28,8 @@ STRANDS = ("+", "-")
 DEFAULT_ADAPTER = "TGGAATTCTCGG"
 #: Shortest adapter prefix that makes a candidate, by number of mismatches in it.
 DEFAULT_MIN_MATCH = (3, 5)
-#: ``(min match length, fold threshold)`` tiers above the base threshold.
-DEFAULT_TIERS = ((8, 5.0), (10, 3.0))
+#: ``(min match length, max mismatches or None for any, fold threshold)`` tiers.
+DEFAULT_TIERS = ((8, None, 5.0), (10, None, 3.0))
 
 IUPAC = {
     "A": "A", "C": "C", "G": "G", "T": "T", "U": "T",
@@ -69,18 +69,43 @@ def parse_min_match(text):
     return values
 
 
+def _tier_key(tier):
+    return (tier[0], float("inf") if tier[1] is None else tier[1])
+
+
+def normalize_tiers(tiers):
+    """Sorted ``(length, max_mm or None, fold)`` tiers; ``(length, fold)`` means any mismatches."""
+    out = []
+    for tier in tiers:
+        if len(tier) == 2:
+            tier = (tier[0], None, tier[1])
+        length, max_mm, fold = tier
+        if int(length) < 1 or (max_mm is not None and int(max_mm) < 0) or float(fold) <= 0:
+            raise ValueError(f"bad tier {tier!r}")
+        out.append((int(length), None if max_mm is None else int(max_mm), float(fold)))
+    out.sort(key=_tier_key)
+    if any(_tier_key(a) == _tier_key(b) for a, b in zip(out, out[1:])):
+        raise ValueError("tiers must differ in match length or mismatch limit")
+    return tuple(out)
+
+
 def parse_tiers(text):
-    """``"8:5,10:3"`` -> ``((8, 5.0), (10, 3.0))``; empty string -> no tiers."""
+    """``"4/0:7,8:5"`` -> ``((4, 0, 7.0), (8, None, 5.0))``; empty string -> no tiers.
+
+    ``LEN:FOLD`` applies to matches of at least LEN bases with any number of
+    mismatches; ``LEN/MAXMM:FOLD`` only to those with at most MAXMM.
+    """
     tiers = []
     for item in str(text).split(","):
         if not item.strip():
             continue
-        length, threshold = item.split(":")
-        tiers.append((int(length), float(threshold)))
-    tiers.sort()
-    if any(a[0] == b[0] for a, b in zip(tiers, tiers[1:])):
-        raise ValueError("tier match lengths must be distinct")
-    return tuple(tiers)
+        try:
+            cond, fold = item.split(":")
+            length, _, max_mm = cond.partition("/")
+            tiers.append((int(length), int(max_mm) if max_mm.strip() else None, float(fold)))
+        except ValueError:
+            raise ValueError(f"tier {item!r} is not LEN[/MAXMM]:FOLD") from None
+    return normalize_tiers(tiers)
 
 
 @dataclass
@@ -91,9 +116,11 @@ class AdapterSiteProvider:
     (``motif_specs`` holds one pseudo-spec per tier, each with the full
     adapter as its motif). A site's window is the ``len(adapter)`` bases of
     the look-alike, so a minus anchor is ``start + len(adapter)``, as for
-    motif specs. Tier 0 holds sites whose match is shorter than every tier
-    length and uses ``threshold``. Only windows that fit entirely inside the
-    chromosome are reported.
+    motif specs. A site qualifies for a tier when its match is at least the
+    tier's length with at most its mismatches, and goes to the qualifying
+    tier with the lowest fold (the first one on a tie). Tier 0 holds sites
+    that qualify for none and uses ``threshold``. Only windows that fit
+    entirely inside the chromosome are reported.
     """
 
     fasta_fname: str
@@ -110,7 +137,7 @@ class AdapterSiteProvider:
         self.min_match = tuple(int(v) for v in self.min_match)
         if self.min_match[0] > len(self.adapter):
             raise ValueError("min match length is longer than the adapter")
-        self.tiers = tuple((int(l), float(t)) for l, t in sorted(self.tiers))
+        self.tiers = normalize_tiers(self.tiers)
         open_fasta(self.fasta_fname).close()  # build the .fai in the parent
         spec = MotifSpec(self.adapter, len(self.min_match) - 1)
         self.motif_specs = [spec] * (1 + len(self.tiers))
@@ -118,20 +145,26 @@ class AdapterSiteProvider:
     @property
     def pass_thresholds(self):
         """Fold threshold per tier, in ``motif_specs`` order; one combined pass."""
-        return (float(self.threshold),) + tuple(t for _, t in self.tiers)
+        return (float(self.threshold),) + tuple(t for _, _, t in self.tiers)
 
     @property
     def max_motif_length(self):
         return len(self.adapter)
 
-    def _tier_of(self, lengths):
+    def _tier_of(self, lengths, mismatches):
         tier = np.zeros(lengths.shape[0], dtype=np.int64)
-        for i, (min_len, _) in enumerate(self.tiers, start=1):
-            tier[lengths >= min_len] = i
+        best = np.full(lengths.shape[0], np.inf)
+        for i, (min_len, max_mm, fold) in enumerate(self.tiers, start=1):
+            ok = lengths >= min_len
+            if max_mm is not None:
+                ok &= mismatches <= max_mm
+            ok &= fold < best
+            tier[ok] = i
+            best[ok] = fold
         return tier
 
-    def _split(self, starts, lengths):
-        tier = self._tier_of(lengths)
+    def _split(self, starts, lengths, mismatches):
+        tier = self._tier_of(lengths, mismatches)
         return [starts[tier == i] for i in range(len(self.motif_specs))]
 
     def starts_for_region(self, chrom, start, end, strands=None):
@@ -155,17 +188,17 @@ class AdapterSiteProvider:
         min_match = np.array(self.min_match, dtype=np.int64)
         by_strand = {}
         if "+" in wanted:
-            lengths = adapter_match_lengths(seq, self._masks, min_match)
+            lengths, mismatches = adapter_match_lengths(seq, self._masks, min_match)
             pos = np.flatnonzero(lengths).astype(np.int64)
-            by_strand["+"] = self._split(pos + start, lengths[pos])
+            by_strand["+"] = self._split(pos + start, lengths[pos], mismatches[pos])
         if "-" in wanted and self.both_strands:
             rc = _COMPLEMENT[seq[::-1]]
-            lengths = adapter_match_lengths(rc, self._masks, min_match)
+            lengths, mismatches = adapter_match_lengths(rc, self._masks, min_match)
             q = np.flatnonzero(lengths).astype(np.int64)
             # Window q of the reverse complement covers genomic
             # [start + n_windows - 1 - q, ... + k); reverse to keep starts sorted.
             genomic = start + (lengths.shape[0] - 1 - q)
-            by_strand["-"] = [a[::-1].copy() for a in self._split(genomic, lengths[q])]
+            by_strand["-"] = [a[::-1].copy() for a in self._split(genomic, lengths[q], mismatches[q])]
         for strand, arrays in by_strand.items():
             for tier, arr in enumerate(arrays):
                 out[tier][strand] = arr

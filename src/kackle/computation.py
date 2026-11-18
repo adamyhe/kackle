@@ -329,16 +329,17 @@ def correct_adapter_sites(
 
 @njit(parallel=True, cache=True)
 def adapter_match_lengths(sequence, adapter, min_match):
-    """Adapter look-alike match length at every window start, 0 if not a candidate.
+    """Adapter look-alike match length and mismatches at every window start.
 
     ``sequence`` and ``adapter`` are IUPAC bitmasks (A=1, C=2, G=4, T=8; 0 for
     anything that is not A/C/G/T in the sequence), so a base matches when the
     masks share a bit. ``min_match[m]`` is the shortest prefix of the adapter
     that makes a candidate when it contains ``m`` mismatches; its length minus
-    one is the most mismatches allowed. Returns, for each window start ``p``
-    in ``[0, len(sequence) - len(adapter)]``, the length of the longest
-    adapter prefix matched with at most that many mismatches (ending on a
-    match) when the window is a candidate, else 0.
+    one is the most mismatches allowed. Returns two int8 arrays over window
+    starts ``p`` in ``[0, len(sequence) - len(adapter)]``: the length of the
+    longest adapter prefix matched with at most that many mismatches (ending
+    on a match), and the number of mismatches inside that prefix. Both are 0
+    when the window is not a candidate.
     """
     n = sequence.shape[0]
     k_len = adapter.shape[0]
@@ -346,14 +347,17 @@ def adapter_match_lengths(sequence, adapter, min_match):
     n_windows = n - k_len + 1
     if n_windows < 0:
         n_windows = 0
-    out = np.zeros(n_windows, dtype=np.int8)
+    lengths = np.zeros(n_windows, dtype=np.int8)
+    mismatches = np.zeros(n_windows, dtype=np.int8)
     for p in prange(n_windows):
         mm = 0
         last = 0
+        last_mm = 0
         candidate = False
         for k in range(k_len):
             if sequence[p + k] & adapter[k]:
                 last = k + 1
+                last_mm = mm
                 if last >= min_match[mm]:
                     candidate = True
             else:
@@ -361,8 +365,9 @@ def adapter_match_lengths(sequence, adapter, min_match):
                 if mm > max_mm:
                     break
         if candidate:
-            out[p] = last
-    return out
+            lengths[p] = last
+            mismatches[p] = last_mm
+    return lengths, mismatches
 
 
 # ---------------------------------------------------------------------------

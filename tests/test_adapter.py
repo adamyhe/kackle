@@ -20,19 +20,28 @@ COMP = str.maketrans("ACGTacgtN", "TGCAtgcaN")
 
 
 def reference_length(window, adapter, min_match):
-    """Pure-Python match length (0 if not a candidate) for one window."""
-    mm, last, cand = 0, 0, False
+    """Pure-Python (match length, mismatches in it), (0, 0) if not a candidate."""
+    mm, last, last_mm, cand = 0, 0, 0, False
     for k, a in enumerate(adapter):
         b = window[k].upper() if k < len(window) else "N"
         if b in "ACGT" and b in IUPAC[a]:
-            last = k + 1
+            last, last_mm = k + 1, mm
             if last >= min_match[mm]:
                 cand = True
         else:
             mm += 1
             if mm > len(min_match) - 1:
                 break
-    return last if cand else 0
+    return (last, last_mm) if cand else (0, 0)
+
+
+def reference_tier(length, mm, tiers):
+    """Index (1-based) of the qualifying tier with the lowest fold, 0 if none."""
+    best, tier = float("inf"), 0
+    for i, (min_len, max_mm, fold) in enumerate(tiers, start=1):
+        if length >= min_len and (max_mm is None or mm <= max_mm) and fold < best:
+            best, tier = fold, i
+    return tier
 
 
 def reference_sites(seq, adapter, min_match, tiers):
@@ -41,10 +50,9 @@ def reference_sites(seq, adapter, min_match, tiers):
     out = {"+": [], "-": []}
     for p in range(len(seq) - k + 1):
         for strand, window in (("+", seq[p : p + k]), ("-", seq[p : p + k].translate(COMP)[::-1])):
-            length = reference_length(window, adapter, min_match)
+            length, mm = reference_length(window, adapter, min_match)
             if length:
-                tier = sum(length >= l for l, _ in tiers)
-                out[strand].append((p, tier))
+                out[strand].append((p, reference_tier(length, mm, tiers)))
     return out
 
 
@@ -68,11 +76,14 @@ def adapter_rich_genome(tmp_path, size=6000, seed=0, name="chr1"):
 @pytest.mark.parametrize("adapter,min_match", [(ADAPTER, (3, 5)), (ADAPTER, (4,)), ("TGGNATTC", (3, 4, 7))])
 def test_provider_matches_brute_force(tmp_path, adapter, min_match):
     fasta, seq = adapter_rich_genome(tmp_path)
-    tiers = ((6, 5.0), (8, 3.0))
+    # Overlapping tiers: exact matches of 4+ beat the any-mismatch 6+ tier.
+    tiers = ((4, 0, 4.0), (6, None, 5.0), (8, None, 3.0))
     provider = AdapterSiteProvider(fasta, adapter, min_match=min_match, tiers=tiers)
     want = reference_sites(seq, adapter, min_match, tiers)
     got = provider.starts_for_chrom("chr1")
-    assert len(got) == 3
+    assert len(got) == 4
+    if len(min_match) > 1:  # with no mismatches allowed, 4/0 takes every 6-7 match
+        assert all(len(d["+"]) for d in got)
     for strand in "+-":
         expected = sorted(want[strand])
         found = sorted((int(p), t) for t, d in enumerate(got) for p in d[strand])
@@ -91,8 +102,12 @@ def test_provider_matches_brute_force(tmp_path, adapter, min_match):
 
 def test_parsers_and_validation(tmp_path):
     assert parse_min_match("3,5") == (3, 5)
-    assert parse_tiers("10:3,8:5") == ((8, 5.0), (10, 3.0))
+    assert parse_tiers("10:3,8:5") == ((8, None, 5.0), (10, None, 3.0))
+    assert parse_tiers("8:5,4/0:7,4:9") == ((4, 0, 7.0), (4, None, 9.0), (8, None, 5.0))
     assert parse_tiers("") == ()
+    for bad in ("8", "8:5,8:3", "4/0:7,4/0:5", "4/x:7", "0:5", "4/-1:5", "4:0"):
+        with pytest.raises(ValueError):
+            parse_tiers(bad)
     for bad in ("", "5,3", "0"):
         with pytest.raises(ValueError):
             parse_min_match(bad)

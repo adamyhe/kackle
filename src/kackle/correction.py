@@ -990,12 +990,14 @@ def parse_args():
     )
     parser.add_argument(
         "--adapter-tiers",
-        metavar="LEN:FOLD[,...]",
+        metavar="LEN[/MAXMM]:FOLD[,...]",
         default="8:5,10:3",
         help=(
-            "Lower fold thresholds for longer matches: sites matching at "
-            "least LEN adapter bases (mismatches included) are flagged at "
-            "FOLD instead of --threshold. Empty for none."
+            "Other fold thresholds by match: a site matching at least LEN "
+            "adapter bases (mismatched bases count toward LEN), with at most "
+            "MAXMM mismatches if given, qualifies for FOLD. A site is flagged "
+            "at the lowest FOLD it qualifies for, or --threshold if none. "
+            "Empty for none."
         ),
     )
     parser.add_argument(
