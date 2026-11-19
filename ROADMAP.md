@@ -56,9 +56,26 @@ read count, or a pseudocount in the background) should be judged by the
 same per-motif metaplots on real samples, not by flag counts.
 
 `--min-reads N` (default 1, a no-op) is in place to test the minimum-count
-option. Next: estimate how many lone-read flags are artifacts by comparing,
-on an empty background, the rate of single reads at each adapter match class
-with control motifs (AGG/CGG/GGG); then judge `--min-reads 2` by match class.
+option. How many lone-read flags are artifacts depends on the match class.
+On an empty background (raw input, 6 samples, whole genome), the rate of
+1-read artifact bases relative to AGG/CGG/GGG controls, and the implied
+artifact share (1 − 1/enrichment), are:
+
+| class | 1 read | artifact share, 1 read | artifact share, 2 reads | 1-read, empty-bg share of flags |
+|---|---|---|---|---|
+| bare TGG (exact 3) | 2.2× | 49–62% | 57–71% | 38–43% |
+| TGGA (exact 4) | 7.2× | 84–88% | 89–93% | 32–39% |
+| TGGAA (exact 5) | 12.5× | 91–93% | 95–97% | 22–27% |
+| exact 6–12 | 15–18× | 92–95% | 96–98% | 16–20% |
+| 1 mismatch inside TGG, ≥ 5 bases | 0.88× | about 0 | about 0 | 41–46% |
+
+(`kackle_realdata/scripts/lowcount_check.py`, `results/lowcount/summary.txt`.)
+So a global `--min-reads 2` would keep mostly-artifact reads at TGGA+ sites,
+while removing every lone read, as base mode does now, over-corrects at bare
+TGG and removes only natural reads at broken-TGG sites (the TGGAA:1 variants
+without TGG), which may be part of why corrected TGGAA:1 sites sit below their
+flanks. A class-aware rule fits better: a per-tier minimum in `--adapter`
+mode, or a minimum only for mismatch classes. Not yet tried on output.
 
 ### `--resample window`: resampled total isn't density-preserving when `source != 2 * target`
 
