@@ -50,8 +50,9 @@ many bases, default 10 Mb; `0` = whole chromosomes; `kackle-metaplot` has it too
 defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-mode motif sites),
 `--resample` (`base`, the default since 0.3.0, or `window`), `--adapter SEQ` (FASTA mode, replaces
 `-k`; needs `--resample base`) with `--adapter-min-match` (default `3,5`) and `--adapter-tiers`
-(`LEN[/MAXMM]:FOLD[:MINREADS]`, default `4/0:7,8:5,10:3`; MINREADS overrides `--min-reads` per
-tier), `-v/--verbose` (progress bars).
+(`LEN[/MAXMM][:FOLD[:MINREADS]]`, default `3/0,4/0:7,8:5,10:3`; no FOLD = `-r`; MINREADS overrides
+`--min-reads` per tier) and `--adapter-base-min-reads` (default 2, for sites in no tier),
+`-v/--verbose` (progress bars).
 
 `uv run python benchmarks/motif_backends.py` reproduces FASTA motif-matching backend timings.
 

@@ -113,7 +113,10 @@ lone reads is about 70% at bare TGG, 91% at TGGA, 95% at TGGAA, and 23–26%
 (1 and 2 reads) at short 1-mismatch sites, so the shares in the table above
 are lower bounds. The short 1-mismatch class carries a weak artifact: a
 2-read minimum there is a middle ground between removing every flagged read
-(0.45–0.50) and none (1.59–1.91). Neither is the default yet.
+(0.45–0.50) and none (1.59–1.91). It is now the `--adapter` default
+(`--adapter-base-min-reads 2`, with a `3/0` tier for bare TGG). Motif passes
+(`-k`/`-b`) still flag single reads; `--min-reads` is there if a minimum is
+wanted.
 
 ### `--resample window`: resampled total isn't density-preserving when `source != 2 * target`
 

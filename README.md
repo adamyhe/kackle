@@ -109,14 +109,17 @@ kackle -i plus.bw -I minus.bw -f genome.fa -o out.plus.bw -O out.minus.bw -c chr
   `N`s (such as a UMI at the start of the adapter) aren't handled yet: they
   match every base, so nearly every position would become a candidate.
 - Stronger look-alikes are flagged at lower fold thresholds
-  (`--adapter-tiers`, `LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`): exact
-  matches of 4 or more bases at 7x, any match of 8 or more at 5x, 10 or more
-  at 3x, everything else at `-r`. Mismatched bases count toward the length; a
-  site takes the lowest fold it qualifies for. An optional `:MINREADS` gives a
-  tier its own minimum artifact-base count instead of `--min-reads`; for
-  example `--min-reads 2 --adapter-tiers 3/0:10:1,4/0:7,8:5:1,10:3:1`
-  requires 2 reads only at sites that qualify for no tier (short matches with
-  a mismatch).
+  (`--adapter-tiers`, `LEN[/MAXMM][:FOLD[:MINREADS]]`, default
+  `3/0,4/0:7,8:5,10:3`): exact matches of 3 bases (bare TGG) at `-r`, of 4 or
+  more at 7x, any match of 8 or more at 5x, 10 or more at 3x. Mismatched bases
+  count toward the length, and a site takes the lowest fold it qualifies for.
+  A tier without a FOLD uses `-r`; an optional `:MINREADS` gives a tier its
+  own minimum artifact-base count instead of `--min-reads`.
+- Sites that qualify for no tier (with the defaults: 5–7-base matches with a
+  mismatch) are flagged at `-r` and only with at least 2 reads at the
+  artifact base (`--adapter-base-min-reads`). Their single reads are mostly
+  not artifacts: correcting them all pulled these sites to about half their
+  flank on 6 PRO-seq samples, and not correcting them left about 1.7x.
 - The screen has two stages, both on the input: a plain screen, then a
   rescreen whose background also leaves out the artifact bases flagged in the
   first stage, so a nearby spike can't hide a site. The result doesn't depend

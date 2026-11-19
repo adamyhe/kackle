@@ -139,6 +139,42 @@ def test_exact_tier_ignores_a_longer_match_with_a_mismatch(tmp_path):
     assert [d["+"].tolist() for d in p.starts_for_chrom("chr1")] == [[], [30], []]
 
 
+def resolved_sites(provider, chrom, run_min_reads):
+    """{(strand, start): (fold, min_reads)} as the pipeline applies them."""
+    out = {}
+    tiers = provider.starts_for_chrom(chrom)
+    for d, fold, m in zip(tiers, provider.pass_thresholds, provider.pass_min_reads):
+        for strand, starts in d.items():
+            for p in starts.tolist():
+                out[(strand, p)] = (fold, run_min_reads if m is None else m)
+    return out
+
+
+def test_default_tiers_need_two_reads_only_at_no_tier_sites(tmp_path):
+    from kackle.adapter import DEFAULT_TIERS
+
+    fasta, _ = adapter_rich_genome(tmp_path, size=20_000)
+    p = AdapterSiteProvider(fasta)
+    assert p.tiers == DEFAULT_TIERS
+    assert p.pass_thresholds == (10.0, 10.0, 7.0, 5.0, 3.0)
+    assert p.pass_min_reads == (2, None, None, None, None)
+    # The exact-3 tier follows the threshold; the lowest fold still wins.
+    assert AdapterSiteProvider(fasta, threshold=6).pass_thresholds == (6.0, 6.0, 7.0, 5.0, 3.0)
+    # Same sites, folds and minimums as the validated explicit configuration
+    # (--min-reads 2 --adapter-tiers 3/0:10:1,4/0:7:1,8:5:1,10:3:1).
+    explicit = AdapterSiteProvider(
+        fasta, tiers=parse_tiers("3/0:10:1,4/0:7:1,8:5:1,10:3:1"), base_min_reads=None
+    )
+    got = resolved_sites(p, "chr1", 1)
+    assert got == resolved_sites(explicit, "chr1", 2)
+    # Bare TGG keeps a minimum of 1; only no-tier sites need 2.
+    by_tier = p.starts_for_chrom("chr1")
+    assert len(by_tier[0]["+"]) > 10 and len(by_tier[1]["+"]) > 10
+    for bad in (0, 1.5, True):
+        with pytest.raises(ValueError):
+            AdapterSiteProvider(fasta, base_min_reads=bad)
+
+
 def test_parsers_and_validation(tmp_path):
     assert parse_min_match("3,5") == (3, 5)
     assert parse_tiers("10:3,8:5") == ((8, None, 5.0, None), (10, None, 3.0, None))
@@ -147,7 +183,9 @@ def test_parsers_and_validation(tmp_path):
     )
     assert parse_tiers("3/0:10:1,8:5:2") == ((3, 0, 10.0, 1), (8, None, 5.0, 2))
     assert parse_tiers("") == ()
-    for bad in ("8", "8:5,8:3", "4/0:7,4/0:5", "4/x:7", "0:5", "4/-1:5", "4:0",
+    assert parse_tiers("3/0,8") == ((3, 0, None, None), (8, None, None, None))
+    assert parse_tiers("3/0::1") == ((3, 0, None, 1),)
+    for bad in ("8:5,8:3", "4/0:7,4/0:5", "4/x:7", "0:5", "4/-1:5", "4:0",
                 "4:7:0", "4:7:x", "4:7:1:1", "4:7:1.5", "4/0:7:1,4/0:5:2"):
         with pytest.raises(ValueError):
             parse_tiers(bad)
@@ -159,8 +197,8 @@ def test_parsers_and_validation(tmp_path):
     fasta, _ = adapter_rich_genome(tmp_path)
     p = AdapterSiteProvider(fasta, tiers=((8, 5), (10, 3)), threshold=10)
     assert p.pass_thresholds == (10.0, 5.0, 3.0)
-    assert p.pass_min_reads == (None, None, None)
-    p = AdapterSiteProvider(fasta, tiers=((8, None, 5, 2), (10, 3)), threshold=10)
+    assert p.pass_min_reads == (2, None, None)
+    p = AdapterSiteProvider(fasta, tiers=((8, None, 5, 2), (10, 3)), threshold=10, base_min_reads=None)
     assert p.pass_min_reads == (None, 2, None)
     assert p.max_motif_length == 12
 
@@ -267,7 +305,10 @@ def test_cli_rejects_bad_adapter_combinations(monkeypatch, tmp_path):
         with pytest.raises(SystemExit):
             cli.parse_args()
     monkeypatch.setattr("sys.argv", base + ["-f", "g", "--adapter", ADAPTER])
-    assert cli.parse_args().resample == "base"
+    args = cli.parse_args()
+    assert args.resample == "base"
+    assert parse_tiers(args.adapter_tiers) == parse_tiers("3/0,4/0:7,8:5,10:3")
+    assert args.adapter_base_min_reads == 2 and args.min_reads == 1
     monkeypatch.setattr("sys.argv", base + ["-f", "g"])
     assert cli.parse_args().resample == "base"
     monkeypatch.setattr("sys.argv", base + ["-f", "g", "--resample", "window"])

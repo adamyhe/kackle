@@ -1042,16 +1042,27 @@ def parse_args():
     )
     parser.add_argument(
         "--adapter-tiers",
-        metavar="LEN[/MAXMM]:FOLD[:MINREADS][,...]",
-        default="4/0:7,8:5,10:3",
+        metavar="LEN[/MAXMM][:FOLD[:MINREADS]][,...]",
+        default="3/0,4/0:7,8:5,10:3",
         help=(
-            "Other fold thresholds by match: a site matching at least LEN "
-            "adapter bases (mismatched bases count toward LEN), with at most "
-            "MAXMM mismatches if given, qualifies for FOLD. A site is flagged "
-            "at the lowest FOLD it qualifies for, or --threshold if none. "
-            "MINREADS, if given, replaces --min-reads for that tier's sites "
-            "(e.g. 3/0:10:1 with --min-reads 2 keeps exact-TGG sites at 1 "
-            "while sites that qualify for no tier need 2). Empty for none."
+            "Fold thresholds by match: a site matching at least LEN adapter "
+            "bases (mismatched bases count toward LEN), with at most MAXMM "
+            "mismatches if given, qualifies for FOLD (empty or missing: "
+            "--threshold). A site is flagged at the lowest FOLD it qualifies "
+            "for; sites that qualify for none use --threshold and "
+            "--adapter-base-min-reads. MINREADS, if given, replaces "
+            "--min-reads for that tier's sites. Empty for no tiers."
+        ),
+    )
+    parser.add_argument(
+        "--adapter-base-min-reads",
+        metavar="COUNT",
+        type=int,
+        default=2,
+        help=(
+            "Minimum artifact-base count for --adapter sites that qualify for "
+            "no tier (with the default tiers: matches of 5-7 bases with a "
+            "mismatch, whose single reads are mostly not artifacts)."
         ),
     )
     parser.add_argument(
@@ -1242,6 +1253,7 @@ def run_correction():
             min_match=parse_min_match(args.adapter_min_match),
             tiers=parse_tiers(args.adapter_tiers),
             threshold=args.threshold,
+            base_min_reads=args.adapter_base_min_reads,
             both_strands=not args.only_positive_strand,
         )
     elif args.fasta:

@@ -28,10 +28,15 @@ STRANDS = ("+", "-")
 DEFAULT_ADAPTER = "TGGAATTCTCGG"
 #: Shortest adapter prefix that makes a candidate, by number of mismatches in it.
 DEFAULT_MIN_MATCH = (3, 5)
-#: ``(min match length, max mismatches or None for any, fold threshold,
-#: min reads or None for the run's ``min_reads``)`` tiers.
-#: Exact matches of 4+ bases (TGGA...) at 7x; any match of 8+ at 5x, 10+ at 3x.
-DEFAULT_TIERS = ((4, 0, 7.0, None), (8, None, 5.0, None), (10, None, 3.0, None))
+#: ``(min match length, max mismatches or None for any, fold threshold or
+#: None for the provider's ``threshold``, min reads or None for the run's
+#: ``min_reads``)`` tiers. Exact matches of 3 bases (bare TGG) at
+#: ``threshold``; exact 4+ (TGGA...) at 7x; any match of 8+ at 5x, 10+ at 3x.
+#: The exact-3 tier keeps bare TGG out of the base tier, whose sites (short
+#: matches with a mismatch) need ``DEFAULT_BASE_MIN_READS`` reads.
+DEFAULT_TIERS = ((3, 0, None, None), (4, 0, 7.0, None), (8, None, 5.0, None), (10, None, 3.0, None))
+#: Minimum artifact-base count for sites that qualify for no tier.
+DEFAULT_BASE_MIN_READS = 2
 
 IUPAC = {
     "A": "A", "C": "C", "G": "G", "T": "T", "U": "T",
@@ -79,7 +84,8 @@ def normalize_tiers(tiers):
     """Sorted ``(length, max_mm or None, fold, min_reads or None)`` tiers.
 
     ``(length, fold)`` means any mismatches; a 3-tuple leaves ``min_reads``
-    to the run's ``min_reads``.
+    to the run's ``min_reads``. A ``fold`` of ``None`` means the provider's
+    ``threshold``.
     """
     out = []
     for tier in tiers:
@@ -91,14 +97,14 @@ def normalize_tiers(tiers):
         if (
             int(length) < 1
             or (max_mm is not None and int(max_mm) < 0)
-            or float(fold) <= 0
+            or (fold is not None and float(fold) <= 0)
             or (min_reads is not None and int(min_reads) < 1)
         ):
             raise ValueError(f"bad tier {tier!r}")
         out.append((
             int(length),
             None if max_mm is None else int(max_mm),
-            float(fold),
+            None if fold is None else float(fold),
             None if min_reads is None else int(min_reads),
         ))
     out.sort(key=_tier_key)
@@ -108,30 +114,33 @@ def normalize_tiers(tiers):
 
 
 def parse_tiers(text):
-    """``"4/0:7,8:5:2"`` -> ``((4, 0, 7.0, None), (8, None, 5.0, 2))``; empty string -> no tiers.
+    """``"3/0,4/0:7,8:5:2"`` -> ``((3, 0, None, None), (4, 0, 7.0, None), (8, None, 5.0, 2))``.
 
     ``LEN:FOLD`` applies to matches of at least LEN bases with any number of
-    mismatches; ``LEN/MAXMM:FOLD`` only to those with at most MAXMM. An
-    optional ``:MINREADS`` sets the tier's minimum artifact-base count
-    (otherwise the run's ``min_reads``).
+    mismatches; ``LEN/MAXMM:FOLD`` only to those with at most MAXMM. A
+    missing or empty FOLD (``3/0``, ``3/0::1``) means the threshold
+    (``-r``). An optional ``:MINREADS`` sets the tier's minimum
+    artifact-base count (otherwise the run's ``min_reads``). An empty string
+    gives no tiers.
     """
     tiers = []
     for item in str(text).split(","):
         if not item.strip():
             continue
         try:
-            cond, fold, *rest = item.split(":")
-            if len(rest) > 1:
+            cond, *rest = item.split(":")
+            if len(rest) > 2:
                 raise ValueError
+            fold, min_reads = (rest + ["", ""])[:2]
             length, _, max_mm = cond.partition("/")
             tiers.append((
                 int(length),
                 int(max_mm) if max_mm.strip() else None,
-                float(fold),
-                int(rest[0]) if rest else None,
+                float(fold) if fold.strip() else None,
+                int(min_reads) if min_reads.strip() else None,
             ))
         except ValueError:
-            raise ValueError(f"tier {item!r} is not LEN[/MAXMM]:FOLD[:MINREADS]") from None
+            raise ValueError(f"tier {item!r} is not LEN[/MAXMM][:FOLD[:MINREADS]]") from None
     return normalize_tiers(tiers)
 
 
@@ -147,9 +156,10 @@ class AdapterSiteProvider:
     least the tier's length matches with at most its mismatches (so an exact
     TGGA followed by a mismatch still qualifies for ``4/0``), and goes to the qualifying
     tier with the lowest fold (the first one on a tie). Tier 0 holds sites
-    that qualify for none and uses ``threshold``. A tier's minimum read
-    count (``pass_min_reads``; ``None``, as for tier 0, means the run's
-    ``min_reads``) does not affect which tier a site goes to. Only windows that fit
+    that qualify for none and uses ``threshold`` (as does a tier whose fold
+    is ``None``) and ``base_min_reads``. A tier's minimum read count
+    (``pass_min_reads``; ``None`` means the run's ``min_reads``) does not
+    affect which tier a site goes to. Only windows that fit
     entirely inside the chromosome are reported.
     """
 
@@ -158,6 +168,7 @@ class AdapterSiteProvider:
     min_match: tuple = DEFAULT_MIN_MATCH
     tiers: tuple = DEFAULT_TIERS
     threshold: float = 10.0
+    base_min_reads: object = DEFAULT_BASE_MIN_READS
     both_strands: bool = True
     bed6_fnames: None = field(default=None, init=False, repr=False)
 
@@ -168,6 +179,11 @@ class AdapterSiteProvider:
         if self.min_match[0] > len(self.adapter):
             raise ValueError("min match length is longer than the adapter")
         self.tiers = normalize_tiers(self.tiers)
+        if self.base_min_reads is not None:
+            if isinstance(self.base_min_reads, bool) or int(self.base_min_reads) != self.base_min_reads \
+                    or self.base_min_reads < 1:
+                raise ValueError("base_min_reads must be an integer >= 1 or None")
+            self.base_min_reads = int(self.base_min_reads)
         open_fasta(self.fasta_fname).close()  # build the .fai in the parent
         spec = MotifSpec(self.adapter, len(self.min_match) - 1)
         self.motif_specs = [spec] * (1 + len(self.tiers))
@@ -175,12 +191,15 @@ class AdapterSiteProvider:
     @property
     def pass_thresholds(self):
         """Fold threshold per tier, in ``motif_specs`` order; one combined pass."""
-        return (float(self.threshold),) + tuple(t[2] for t in self.tiers)
+        return (float(self.threshold),) + tuple(self._fold(t) for t in self.tiers)
+
+    def _fold(self, tier):
+        return float(self.threshold) if tier[2] is None else tier[2]
 
     @property
     def pass_min_reads(self):
         """Minimum artifact-base count per tier (``None``: the run's ``min_reads``)."""
-        return (None,) + tuple(t[3] for t in self.tiers)
+        return (self.base_min_reads,) + tuple(t[3] for t in self.tiers)
 
     @property
     def max_motif_length(self):
@@ -191,7 +210,9 @@ class AdapterSiteProvider:
         tier = np.zeros(lengths.shape[0], dtype=np.int64)
         best = np.full(lengths.shape[0], np.inf)
         top = lengths.shape[1] - 1
-        for i, (min_len, max_mm, fold, _) in enumerate(self.tiers, start=1):
+        for i, spec in enumerate(self.tiers, start=1):
+            min_len, max_mm = spec[0], spec[1]
+            fold = self._fold(spec)
             budget = top if max_mm is None else min(max_mm, top)
             ok = lengths[:, budget] >= min_len
             ok &= fold < best
