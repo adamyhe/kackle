@@ -15,6 +15,23 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   writing ([#4](https://github.com/adamyhe/kackle/pull/4)).
 - `kackle-metaplot -w/--chrom-workers` and `--worker-backend`, and a
   `PREFIX.tsv` of the plotted values next to the PNGs.
+- **`--resample base`** (experimental): replace only a flagged site's
+  artifact base, with a Poisson draw from the mean of its neighborhood
+  without the other flagged artifact bases, instead of redrawing the whole
+  target window. It keeps the natural signal dips around the motif that
+  window mode flattens. The default stays `window`
+  ([#14](https://github.com/adamyhe/kackle/pull/14)).
+- **`--adapter SEQ`** (experimental, FASTA mode): derive candidate sites from
+  the 3' adapter sequence instead of fixed motif passes, and screen them all
+  in one pass with base-only resampling. Candidates match the adapter's 5'
+  end (`--adapter-min-match`, default `3,5`). Stronger matches get lower
+  thresholds (`--adapter-tiers LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`).
+  The screen rescreens each site without the artifact bases flagged in a
+  first, plain stage, so it is order-independent. On 6 PRO-seq samples it
+  matched the two-pass `TGG:0` → `TGGAA:1` base-mode correction in one pass
+  (about 15–60 s per sample instead of 1:35–1:54), and it removed about 60% of
+  the artifact left at exact TGGA/TGGAA sites without changing other site
+  classes ([#14](https://github.com/adamyhe/kackle/pull/14)).
 
 ### Changed
 

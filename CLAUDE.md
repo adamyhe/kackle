@@ -47,7 +47,9 @@ many bases, default 10 Mb; `0` = whole chromosomes; `kackle-metaplot` has it too
 `--worker-backend` (`process` default, spawned, or `thread`),
 `--numba-threads` (default `auto`), `-k/--motif KMER[:MISMATCHES]` (repeatable, FASTA mode only,
 defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-mode motif sites),
-`-v/--verbose` (progress bars).
+`--resample` (`window`, the default for motif passes, or `base`), `--adapter SEQ` (FASTA mode, replaces
+`-k`; implies `--resample base`) with `--adapter-min-match` (default `3,5`) and `--adapter-tiers`
+(`LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`), `-v/--verbose` (progress bars).
 
 `uv run python benchmarks/motif_backends.py` reproduces FASTA motif-matching backend timings.
 
@@ -61,8 +63,9 @@ outside motif windows, and isolated windows must keep their sums.
 ### Module layout (`src/kackle/`)
 
 - `computation.py` — numba hot-path kernels only (`artifact_mask_serial/parallel`,
-  `resample_dirmult`, `resample_empirical`, `correct_kmers`, and the motif matcher
-  `motif_window_starts`). No pandas, no file I/O, no Python
+  `resample_dirmult`, `resample_empirical`, `correct_kmers`, the base-only kernels
+  `correct_artifact_bases` and `correct_adapter_sites`, the motif matcher `motif_window_starts`, and
+  the adapter matcher `adapter_match_lengths`). No pandas, no file I/O, no Python
   objects beyond NumPy arrays — these are `@njit` compiled and must stay numba-compatible.
 - `motifs.py` — motif spec parsing (`KMER[:MISMATCHES]`), `locate_motif_starts` (sorted int64
   start arrays per strand; backends `numba`, the default, and `python`, which runs `str.find`
@@ -74,6 +77,13 @@ outside motif windows, and isolated windows must keep their sums.
   wanted, e.g. `--out-bed6-prefix`. A window matches when it is all A/C/G/T (any case) and within
   the Hamming distance. Keep the backends identical; that's what the tests check. All FASTA reading goes
   through `open_fasta()` (pyfaidx, `.fai` index); there is no hand-rolled FASTA parser.
+- `adapter.py` — `--adapter` mode: IUPAC adapter bitmasks, `parse_min_match` / `parse_tiers`, and
+  `AdapterSiteProvider`. It has the same `starts_for_chrom` / `starts_for_region` interface as
+  `FastaMotifSiteProvider` and returns one `{strand: starts}` dict per threshold tier, with one
+  pseudo-`MotifSpec` per tier (the full adapter, so minus anchors are `start + len(adapter)`), so
+  chunk planning and region reads work unchanged. Its `pass_thresholds` attribute tells the pipeline
+  to screen all tiers together in one pass. A site goes to the qualifying tier with the lowest fold.
+  Not supported by `kmer_resample`.
 - `bigwig.py` — the only boundary between in-memory dense arrays/sparse DataFrames and on-disk
   bigWig files, via `figwig` (`BigWigReader`, and `open_bigwig_writer` / `write_chrom_intervals`
   for streaming per-chromosome writes, or `write_bigwig` for a whole DataFrame).
@@ -136,6 +146,15 @@ For each strand (of each chunk):
      Only target spans are modified. Don't reintroduce per-site write-back of overlapping
      windows (v0.1.0 wrote full source windows and v0.2.0 wrote overlapping target windows, and
      both raced and leaked spikes).
+   - With `--resample base`, each pass calls `correct_artifact_bases()` instead: same screen, then
+     only each flagged artifact base is replaced with a Poisson draw from the mean of its
+     neighborhood without any flagged artifact base.
+   - With `--adapter` (the provider has `pass_thresholds`), the tiers' anchor arrays are concatenated
+     with per-site thresholds and corrected in **one** `correct_adapter_sites()` call: a plain screen,
+     then a rescreen whose background also leaves out stage-1-flagged artifact bases; a site flagged
+     in either stage gets a Poisson draw from the stage-2 mean at its artifact base only. Both stages
+     read the input, so the result doesn't depend on site order. Every read stays within `source`
+     of an anchor, so the chunk cut rule still makes chunked output exact.
    - Output is converted to a sparse `(chrom, start, end, value)` DataFrame, dropping zero rows.
 3. Each finished chromosome's sparse `(positions, values)` arrays (int32, nonzero bases only) are
    written to both output bigWigs as soon as every earlier chromosome in `chrom_sizes` order is done

@@ -29,7 +29,8 @@ DEFAULT_ADAPTER = "TGGAATTCTCGG"
 #: Shortest adapter prefix that makes a candidate, by number of mismatches in it.
 DEFAULT_MIN_MATCH = (3, 5)
 #: ``(min match length, max mismatches or None for any, fold threshold)`` tiers.
-DEFAULT_TIERS = ((8, None, 5.0), (10, None, 3.0))
+#: Exact matches of 4+ bases (TGGA...) at 7x; any match of 8+ at 5x, 10+ at 3x.
+DEFAULT_TIERS = ((4, 0, 7.0), (8, None, 5.0), (10, None, 3.0))
 
 IUPAC = {
     "A": "A", "C": "C", "G": "G", "T": "T", "U": "T",

@@ -59,7 +59,7 @@ change every corrected site's output.
 
 The dips themselves are real: the raw input shows the same depletion at the
 G bases of AGG, CGG and GGG, which carry no artifact. A base-only prototype
-(`--resample base`, branch `base-resample`) redraws just the artifact base
+(`--resample base`, #14) redraws just the artifact base
 with a Poisson draw from its neighborhood mean. On the 6 samples it changed
 nothing outside artifact bases. It kept the motif dip (TGG offset +1: input
 0.13, window mode 0.33, base only 0.18 of the flank). The artifact-base ratio
@@ -101,52 +101,56 @@ T followed by 7 more adapter bases gives 40×. Of the 16 TGGAA:1 variants, four
 most of what remains is below the 10× threshold: TGGA–TGGAATT sites sit at
 1.6–2.4× their flanks with only about 0.15% flagged.
 
-**Prototype in #14** (`--adapter SEQ`, with base-only resampling):
+**Shipped as experimental in #14** (`--adapter SEQ`, with base-only
+resampling; usage in the README):
 
-- IUPAC codes are allowed, so UMI `N`s act as wildcards. A position is a
-  candidate when the RNA-sense sequence that follows matches the adapter's
-  5' end: at least 3 bases with no mismatches, or 5 with one
-  (`--adapter-min-match 3,5`).
-- Longer matches get lower fold thresholds (`--adapter-tiers 8:5,10:3`;
-  shorter matches use `-r`). The tier depends only on match length, not on
-  mismatch count.
+- A position is a candidate when the RNA-sense sequence that follows matches
+  the adapter's 5' end: at least 3 bases with no mismatches, or 5 with one.
+- Tiers lower the fold threshold for stronger matches, by match length and
+  optionally mismatch count (`LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`).
 - One pass, in two stages: a plain screen, then a rescreen whose background
-  also leaves out the artifact bases flagged in the first stage. Both read
-  the input, so the result is deterministic and doesn't depend on site order.
-  A first version left every candidate's artifact base out of the
-  background; that flagged more weak sites and pulled the corrected level
-  down by about 0.05.
+  also leaves out the artifact bases flagged in the first stage. A first
+  version left every candidate's artifact base out of the background; that
+  flagged more weak sites and pulled the corrected level down by about 0.05.
 - `-k` / `-b` multi-pass stay for other artifact types.
 
-On the 6 samples, the two-stage screen matches the two-pass base mode
-(TGG:0 → TGGAA:1) and runs in one pass. Ratio = artifact base / mean at
-20–50 bp from the motif:
+On the 6 samples, ratio = artifact base / mean at 20–50 bp from the motif:
 
-| | two-pass base | adapter, two-stage |
-|---|---|---|
-| TGG | 0.91–1.05 | 0.90–1.03 |
-| TGGAA | 0.80–0.89 | 0.81–0.90 |
-| signal removed | 22.30–35.14% | +0.02–0.05 points |
+| | two-pass base (TGG:0 → TGGAA:1) | two-stage, `8:5,10:3` | two-stage, default `4/0:7,8:5,10:3` |
+|---|---|---|---|
+| TGG metaplot | 0.91–1.05 | 0.90–1.03 | 0.83–0.94 |
+| TGGAA metaplot | 0.80–0.89 | 0.81–0.90 | 0.72–0.81 |
+| exact TGG (3 bases) | 0.82 | 0.78 | 0.78 |
+| exact TGGA / TGGAA | 1.53 / 1.58 | 1.56 / 1.68 | 1.19 / 1.30 |
+| 1-mismatch, 8–10 bases | 0.65–1.29 | 0.32–0.58 | 0.32–0.58 |
+| 1-mismatch 5–7 bases, non-TGG 5-mers | 0.32–0.67 | 0.32–0.66 | 0.32–0.66 |
+| signal removed | 22.30–35.14% | +0.02–0.05 points | +0.13–0.15 points |
+| time per sample | 1:35–1:54 | | 15–60 s |
 
-Tiers bring one-mismatch sites matching 8–10 adapter bases to 0.32–0.58,
-close to their neighbouring classes; two-pass leaves them at 0.65–1.29.
+The exact-match tier changes only the classes it targets; every other class
+is the same to two decimals. A plain `4:7` length tier, by contrast, also
+lowered the threshold for one-mismatch 5–7-base matches, which carry almost
+no artifact, and pulled them down to 0.22–0.43.
+
+**The metaplot ratio is not a good target on its own.** The TGG metaplot
+pools exact TGG-only sites, which sit naturally at about 0.78, with TGGA+
+sites that still carried leftover artifact. Its "about 1.0" after two-pass
+correction was partly that leftover cancelling a natural dip. Judge changes
+by match class instead. `4/0:5` goes further (exact TGGA 1.00, TGGAA 1.14;
+TGG metaplot 0.79–0.90); without an artifact-free library we can't tell
+whether that over-corrects, so the default stops at 7×.
 
 Open:
 
-- **Exact TGGA and TGGAA matches still sit at about 1.5–1.7×** (about 95k
-  reads per sample) in every mode, because their 4–5-base matches stay in
-  the 10× tier. A plain `4:7` length tier brings them to 1.1–1.2, but it also
-  lowers the threshold for one-mismatch 5–7-base matches. Those carry almost
-  no artifact, so it over-corrects: they drop to 0.22–0.43, and the TGGAA
-  metaplot drops to about 0.6. The next step to try is a tier that also
-  limits mismatches (e.g. `4/0:7`). Some of the remainder may be
-  spread over many sites only a few times above background, which no per-site
-  threshold can remove cleanly.
+- About 36k artifact reads per sample remain at exact TGGA/TGGAA sites. Some
+  of it is probably spread over many sites only a few times above
+  background, which no per-site threshold can remove cleanly.
 - Calibrate the tiers per library from the input itself, and report artifact
   signal by match class.
 - The artifact base sits just before the look-alike in RNA orientation,
   which holds for 3'-end tracks like these. Other library layouts would need
   an option for which side the adapter is on.
+- Decide whether `--adapter` (or `--resample base`) should become the default.
 
 ## Performance
 
