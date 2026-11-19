@@ -7,6 +7,13 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
 
 ## [Unreleased]
 
+### Added
+
+- `--min-reads N` (`min_reads=` in `correct_bigwigs` and `kmer_resample`):
+  a site is flagged only if its artifact base also has at least `N` reads.
+  The default, 1, leaves output unchanged. With an empty neighborhood a
+  single read passes any fold threshold; `--min-reads 2` keeps those reads.
+
 ## [0.3.0] - 2026-11-18
 
 Output differs from 0.2.0: base-only resampling is now the default, and

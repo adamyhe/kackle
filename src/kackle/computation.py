@@ -16,6 +16,7 @@ def artifact_mask_serial(
     source: np.uint = 10,
     threshold: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Return a boolean mask of candidate starts that exceed local background.
 
@@ -33,7 +34,10 @@ def artifact_mask_serial(
         for j in range(start - source, start + source):
             neighborhood_sum += chromosome_signal_vector[j]
         suspicious_background = (neighborhood_sum - suspicious_signal) / (source * 2 - 1)
-        if suspicious_signal > threshold * suspicious_background:
+        if (
+            suspicious_signal >= min_reads
+            and suspicious_signal > threshold * suspicious_background
+        ):
             pass_threshold[i] = True
     return pass_threshold
 
@@ -45,6 +49,7 @@ def artifact_mask_parallel(
     source: np.uint = 10,
     threshold: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Parallel artifact-threshold screen used by ``correct_kmers``."""
     pass_threshold = np.full(starts.shape[0], False)
@@ -58,7 +63,10 @@ def artifact_mask_parallel(
         for j in range(start - source, start + source):
             neighborhood_sum += chromosome_signal_vector[j]
         suspicious_background = (neighborhood_sum - suspicious_signal) / (source * 2 - 1)
-        if suspicious_signal > threshold * suspicious_background:
+        if (
+            suspicious_signal >= min_reads
+            and suspicious_signal > threshold * suspicious_background
+        ):
             pass_threshold[i] = True
     return pass_threshold
 
@@ -148,6 +156,7 @@ def correct_kmers(
     target: np.uint = 5,
     threshold: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Correct suspicious kmer-centered signal spikes in a dense vector.
 
@@ -174,7 +183,7 @@ def correct_kmers(
         return out_vec
 
     flagged = artifact_mask_parallel(
-        chromosome_signal_vector, starts, source, threshold, strand
+        chromosome_signal_vector, starts, source, threshold, strand, min_reads
     )
     flagged_starts = np.sort(starts[flagged].astype(np.int64))
     if flagged_starts.shape[0] == 0:
@@ -208,6 +217,7 @@ def correct_artifact_bases(
     source: np.uint = 10,
     threshold: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Redraw only the artifact base of each flagged site.
 
@@ -224,7 +234,7 @@ def correct_artifact_bases(
     if starts.shape[0] == 0:
         return out_vec
     flagged = artifact_mask_parallel(
-        chromosome_signal_vector, starts, source, threshold, strand
+        chromosome_signal_vector, starts, source, threshold, strand, min_reads
     )
     offset = 1 if strand == "+" else 0
     art = np.sort(starts[flagged].astype(np.int64)) - offset
@@ -258,6 +268,7 @@ def correct_adapter_sites(
     thresholds: np.array,
     source: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Screen and correct all adapter look-alike sites of one strand in one pass.
 
@@ -297,7 +308,10 @@ def correct_adapter_sites(
         for j in range(lo, hi):
             total += chromosome_signal_vector[j]
         mean = (total - chromosome_signal_vector[idx]) / (hi - lo - 1)
-        if chromosome_signal_vector[idx] > thresholds[i] * mean:
+        if (
+            chromosome_signal_vector[idx] >= min_reads
+            and chromosome_signal_vector[idx] > thresholds[i] * mean
+        ):
             flag1[i] = True
     art = np.sort(starts[flag1].astype(np.int64)) - offset
     m = art.shape[0]
@@ -322,7 +336,10 @@ def correct_adapter_sites(
         if count == 0:
             continue
         mean = total / count
-        if flag1[i] or chromosome_signal_vector[idx] > thresholds[i] * mean:
+        if flag1[i] or (
+            chromosome_signal_vector[idx] >= min_reads
+            and chromosome_signal_vector[idx] > thresholds[i] * mean
+        ):
             out_vec[idx] = np.random.poisson(mean)
     return out_vec
 

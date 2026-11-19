@@ -99,7 +99,7 @@ def test_kmer_resample_applies_motif_beds_sequentially(monkeypatch):
         ),
     )
 
-    def fake_correct_kmers(values, starts, source, target, threshold, strand):
+    def fake_correct_kmers(values, starts, source, target, threshold, strand, min_reads=1):
         calls.append((starts.tolist(), strand, values.tolist()))
         return values + len(calls) * 10
 
@@ -155,7 +155,7 @@ def test_kmer_resample_uses_motif_site_provider_per_chromosome(monkeypatch):
         ),
     )
 
-    def fake_correct_kmers(values, starts, source, target, threshold, strand):
+    def fake_correct_kmers(values, starts, source, target, threshold, strand, min_reads=1):
         calls.append((starts.tolist(), strand))
         return values
 
@@ -242,7 +242,7 @@ def test_kmer_resample_uses_precomputed_start_arrays(monkeypatch):
         ),
     )
 
-    def fake_correct_kmers(values, starts, source, target, threshold, strand):
+    def fake_correct_kmers(values, starts, source, target, threshold, strand, min_reads=1):
         calls.append(starts.tolist())
         return values
 
@@ -676,7 +676,7 @@ def test_correct_bigwigs_matches_per_strand_kmer_resample(
             assert open(new).read()
 
 
-def _zeroing_correct_kmers(values, starts, source, target, threshold, strand):
+def _zeroing_correct_kmers(values, starts, source, target, threshold, strand, min_reads=1):
     out = values.copy()
     for anchor in starts:
         out[max(anchor - target, 0) : anchor + target] = 0

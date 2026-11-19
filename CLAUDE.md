@@ -41,7 +41,8 @@ kackle-metaplot --before-pl-bw plus.bw --before-mn-bw minus.bw \
 
 Key CLI flags (`kackle`, see `parse_args()` in `correction.py`): `-s/--source` (background
 sampling half-window, default 10), `-t/--target` (correction half-window, default 5),
-`-r/--threshold` (fold-over-background cutoff to flag an artifact, default 10), `-w/--chrom-workers`
+`-r/--threshold` (fold-over-background cutoff to flag an artifact, default 10), `--min-reads`
+(minimum artifact-base count to flag, default 1 = no extra condition; all screens, adapter mode too), `-w/--chrom-workers`
 (concurrent chromosome chunks, default `auto`), `--chunk-size` (split chromosomes longer than this
 many bases, default 10 Mb; `0` = whole chromosomes; `kackle-metaplot` has it too),
 `--worker-backend` (`process` default, spawned, or `thread`),

@@ -55,6 +55,11 @@ average. But it is what made re-screening over-correct. Any change to the screen
 read count, or a pseudocount in the background) should be judged by the
 same per-motif metaplots on real samples, not by flag counts.
 
+`--min-reads N` (default 1, a no-op) is in place to test the minimum-count
+option. Next: estimate how many lone-read flags are artifacts by comparing,
+on an empty background, the rate of single reads at each adapter match class
+with control motifs (AGG/CGG/GGG); then judge `--min-reads 2` by match class.
+
 ### `--resample window`: resampled total isn't density-preserving when `source != 2 * target`
 
 Each flagged span is redrawn with a total equal to its flank sum, scaled by

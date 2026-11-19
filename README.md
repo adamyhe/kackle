@@ -80,6 +80,12 @@ signal around the motif keeps its shape (`--resample base`). `--resample window`
 0.2.0 behavior: the whole window of `-t` (default 5) bp on each side is
 redrawn from the flanks, which also fills in natural dips at the motif.
 
+A site with no other reads in its neighborhood is flagged even when its
+artifact base holds a single read. `--min-reads N` also requires at least `N`
+reads at the artifact base (default 1, which adds nothing; it applies in
+`--adapter` mode too). Whether single reads should be left alone is still
+being evaluated (see the ROADMAP).
+
 kackle processes chromosomes present in the intersection of `chrom.sizes`, both
 input bigWigs, and the FASTA file when FASTA mode is used. Chromosomes absent
 from any required source are skipped.
