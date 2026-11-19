@@ -9,6 +9,24 @@ from kackle.bigwig import read_chrom_values, write_bigwig
 from kackle.computation import _flagged_clusters, artifact_mask_parallel
 from kackle.motifs import FastaMotifSiteProvider, locate_motif_specs
 
+
+@pytest.fixture(autouse=True)
+def window_resampling(monkeypatch):
+    """Pin the library calls to window resampling.
+
+    These tests swap ``cli.correct_kmers`` (the window kernel) for
+    deterministic stand-ins to check pipeline mechanics; base-only
+    resampling, the default, has its own tests in test_base_resample.py.
+    """
+    for name in ("kmer_resample", "correct_bigwigs"):
+        original = getattr(cli, name)
+
+        def pinned(*args, _original=original, **kwargs):
+            kwargs.setdefault("resample", "window")
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(cli, name, pinned)
+
 SPECS = ["TGG:0", "TGGAA:1"]
 
 

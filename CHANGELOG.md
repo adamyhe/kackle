@@ -7,6 +7,12 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-18
+
+Output differs from 0.2.0: base-only resampling is now the default, and
+nearby flagged sites are no longer corrupted by parallel races. Pass
+`--resample window` for 0.2.0-style window resampling.
+
 ### Added
 
 - Support for Python 3.14. No compiled bigWig or FASTA dependencies remain
@@ -15,11 +21,11 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   writing ([#4](https://github.com/adamyhe/kackle/pull/4)).
 - `kackle-metaplot -w/--chrom-workers` and `--worker-backend`, and a
   `PREFIX.tsv` of the plotted values next to the PNGs.
-- **`--resample base`** (experimental): replace only a flagged site's
+- **`--resample {base,window}`** (`resample=` in `correct_bigwigs` and
+  `kmer_resample`). `base`, now the default, replaces only a flagged site's
   artifact base, with a Poisson draw from the mean of its neighborhood
-  without the other flagged artifact bases, instead of redrawing the whole
-  target window. It keeps the natural signal dips around the motif that
-  window mode flattens. The default stays `window`
+  without the other flagged artifact bases. `window` redraws the whole
+  target window as in 0.2.0
   ([#14](https://github.com/adamyhe/kackle/pull/14)).
 - **`--adapter SEQ`** (experimental, FASTA mode): derive candidate sites from
   the 3' adapter sequence instead of fixed motif passes, and screen them all
@@ -35,6 +41,16 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
 
 ### Changed
 
+- **Base-only resampling is the default** (`--resample base`). 0.2.0 redrew
+  the whole ±`target` window of a flagged site from its flanks, which also
+  filled in real dips at the motif's G bases (TGG offset +1: input 0.13 of
+  the 20–50 bp flank, window mode 0.33, base only 0.18). Base mode changes
+  only artifact bases. On 6 PRO-seq samples the corrected artifact base sat
+  at 0.91–1.05 of its flank at TGG sites (window mode 0.92–1.06) and
+  0.80–0.89 at TGGAA:1 sites (0.82–0.92); it removed about 1% more of the
+  total signal, mostly reads that window mode had put back into the dips.
+  `--resample window` keeps the old behavior. `-t/--target` only matters in
+  window mode.
 - **Large chromosomes are split across workers** (`--chunk-size`, default
   10 Mb, in `kackle` and `kackle-metaplot`; `0` turns it off). `kackle` cuts
   only where no anchor of any motif pass or strand lies within
@@ -91,7 +107,8 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   chromosome workers start. FASTA input must be uncompressed or
   bgzip-compressed (plain gzip isn't supported), and pyfaidx writes a `.fai`
   next to the FASTA on first use.
-- **Nearby flagged sites are now corrected together** (`correct_kmers`).
+- **Nearby flagged sites are now corrected together** in window mode
+  (`correct_kmers`).
   Flagged anchors closer than `source + target` are merged into a cluster, and
   each cluster's `[first - target, last + target)` span is redrawn once from
   the flanks just outside it. The redrawn total is the flank sum scaled by
@@ -120,7 +137,6 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   Under pyfastx, chromosome workers raced to build the `.fxi`; the pyfaidx
   `.fai` is built once before workers start
   ([#4](https://github.com/adamyhe/kackle/pull/4)).
-
 - Overlapping target windows of flagged sites less than `2 * target` apart no
   longer race under parallel execution. Previously the last writer won, so
   output was non-deterministic and depth wasn't conserved.
@@ -159,6 +175,7 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   sequential motif passes (`TGG:0` then `TGGAA:1` by default), and numba
   correction kernels.
 
-[Unreleased]: https://github.com/adamyhe/kackle/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/adamyhe/kackle/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/adamyhe/kackle/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adamyhe/kackle/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adamyhe/kackle/releases/tag/v0.1.0

@@ -5,7 +5,7 @@ Known issues and planned work. Shipped changes go in
 
 ## Known issues
 
-### Screening contamination from nearby spikes (investigated; no fix adopted)
+### Screening contamination from nearby spikes (handled only in `--adapter` mode)
 
 The screen compares a site's artifact position with the mean of the rest of
 its `[anchor - source, anchor + source)` neighborhood, so a spike at a nearby
@@ -36,6 +36,12 @@ flanks either way. So the contamination is real but small, and fixing it
 this way costs more than it gains. Revisit only together with the
 low-count issue below.
 
+`--adapter` uses a version of the same deterministic re-screen (leave
+stage-1-flagged artifact bases out of the background), and there it barely
+moved the result: TGG 0.90–1.03 against 0.91–1.05 for two-pass base mode.
+So the contamination is handled in adapter mode, with base-only replacement
+and adapter-defined sites; motif passes still screen once.
+
 ### Single reads on an empty background count as artifacts
 
 A site is flagged when its artifact base exceeds `threshold` times the
@@ -48,7 +54,7 @@ what made re-screening over-correct. Any change to the screen (a minimum
 read count, or a pseudocount in the background) should be judged by the
 same per-motif metaplots on real samples, not by flag counts.
 
-### Resampling flattens natural structure inside the target window
+### Window resampling flattens natural structure (default changed in 0.3.0)
 
 The whole `[anchor - target, anchor + target)` window of a flagged site is
 redrawn from its flanks, not only the artifact base, so natural dips inside
@@ -70,9 +76,10 @@ every mode, including base-only resampling, which only lowers flagged
 artifact bases. The rise comes from the normalization: the input's flank
 still holds other TGG sites' spikes, which correction removes.
 
-A base-only prototype (`--resample base`, #14) redraws just the artifact base
-with a Poisson draw from its neighborhood mean. On the 6 samples it changed
-nothing outside artifact bases and kept the motif dip (TGG offset +1: input
+Base-only resampling (`--resample base`, #14), the default since 0.3.0,
+redraws just the artifact base with a Poisson draw from its neighborhood
+mean. On the 6 samples it changed nothing outside artifact bases and kept
+the motif dip (TGG offset +1: input
 0.13, window mode 0.33, base only 0.18 of the flank). The artifact-base ratio
 stayed close to window mode (TGG 0.91–1.05 vs 0.92–1.06; TGGAA:1 0.80–0.89 vs
 0.82–0.92). It removed about 1% more of the total signal, mostly reads that
@@ -84,13 +91,12 @@ Each flagged span is redrawn with a total equal to its flank sum, scaled by
 `span_width / (2 * target)`. Isolated sites have `2 * (source - target)` flank
 bases and `2 * target` target bases, so the per-base level is only preserved
 when `source = 2 * target`, as with the defaults (10 and 5). With `-s 20 -t 5`,
-for example, a corrected window gets three times the local density. Scaling by
+for example, a corrected window gets three times the local density. Since
+0.3.0 this only affects `--resample window`; base mode doesn't use `target`. Scaling by
 `span_width / flank_width` instead would fix this, but it would change output
 for every non-default `source`/`target` setting.
 
-## Planned
-
-### Adapter-based, single-pass site search
+## Experimental: `--adapter` mode
 
 The artifact is primer mispriming on 3' adapter look-alikes inside real
 fragments. Reads end at the base just before a stretch of genome that
@@ -112,8 +118,10 @@ T followed by 7 more adapter bases gives 40×. Of the 16 TGGAA:1 variants, four
 most of what remains is below the 10× threshold: TGGA–TGGAATT sites sit at
 1.6–2.4× their flanks with only about 0.15% flagged.
 
-**Shipped as experimental in #14** (`--adapter SEQ`, with base-only
-resampling; usage in the README):
+Corrected TGGAA:1 sites sit below their flanks (0.80–0.92) because 57% of them have no TGG at the anchor (the mismatch is in the first
+three bases), and those already sit at 0.30–0.37 of the flank in the input.
+
+Shipped as experimental in #14; usage in the README.
 
 - A position is a candidate when the RNA-sense sequence that follows matches
   the adapter's 5' end: at least 3 bases with no mismatches, or 5 with one.
@@ -161,7 +169,16 @@ Open:
 - The artifact base sits just before the look-alike in RNA orientation,
   which holds for 3'-end tracks like these. Other library layouts would need
   an option for which side the adapter is on.
-- Decide whether `--adapter` (or `--resample base`) should become the default.
+- **Adapters with leading UMI `N`s.** `N` matches every base, so an adapter
+  such as `NNNNNNTGGAATTC…` would make nearly every position a candidate,
+  and the exact-match tier would hit almost everything. Leading `N`s need to
+  be skipped, or not count toward match length, before such adapters work.
+- **Making `--adapter` the default.** It has been validated on one dataset
+  (6 samples, one lab, the TruSeq small-RNA adapter), and its tiers were
+  tuned on those samples. It needs a second dataset, ideally another
+  protocol or adapter, where it beats `--resample base` with TGG → TGGAA:1 by
+  the per-class measures, plus the `N` fix above. It would also make the
+  default depend on the input mode, since BED6 (`-b`) users can't use it.
 
 ## Performance
 
@@ -169,56 +186,12 @@ Profiled on a synthetic 100 Mb genome in FASTA mode (2 chromosomes, serial):
 25.4 s total, of which motif location was 17.5 s (69%). The correction kernel
 itself was negligible.
 
-**Done: start arrays and a numba motif matcher.** Motif location now returns
-sorted int64 start arrays from a numba Hamming kernel; BED6 tables are built
-only for `--out-bed6-prefix`. Each correction pass locates only the strand it
-needs. On hg38 (PROseq_2, 230M sites over both strands and specs), with
-identical sites and must-match checks passing:
-
-| | before | after |
-|---|---|---|
-| locating all sites, one process | 1328 s, 9.1 GB | 39 s, 0.8 GB |
-| `kackle`, `-w 4` threads | 39:33, 37.7 GB | 4:16, 10.4 GB |
-| `kackle-metaplot`, `-w 4` | 8:09, 6.9 GB | 2:20, 1.8 GB |
-| `kackle-metaplot`, `-w 8` | 5:03, 6.9 GB | 1:03, 1.8 GB |
-
-Metaplot memory is the largest single process. Metaplot TSVs are
-byte-identical to before.
-
-**Done: one pass over both strands, streamed output.** Each chromosome task
-locates sites for both strands once and corrects plus then minus; finished
-chromosomes go straight to both bigWigs in order, with no genome-wide per-base
-DataFrame. On hg38 (PROseq_2), with byte-identical bigWigs in exact mode
-(chr21 and chr22) and must-match checks passing genome-wide:
-
-| | before | after |
-|---|---|---|
-| `kackle -w 4` (process, default) | 38.6 s, 3.4 GB | 29.9 s, 2.1 GB |
-| `kackle -w 8` (process) | | 28.6 s, 2.1 GB |
-| harness, `-w 4` threads | 3:15, 10.4 GB | 2:51, 7.7 GB |
-
-Memory is the largest single process. The harness numbers include its own
-logging of every anchor array. `-w 8` barely helps: the run is bounded by
-chr1.
-
-**Done: large chromosomes split across workers** (`--chunk-size`, default
-10 Mb; hg38 becomes 322 chunks). Cuts avoid every anchor by
-`max(source, target)`, so chunked output is identical to whole-chromosome
-output: byte-identical genome-wide with a deterministic stand-in for the
-resampler. On hg38 (PROseq_2), same node, process backend:
-
-| | main | chunked |
-|---|---|---|
-| `kackle -w 4` | 45.6 s, 4.2 GB | 29.6 s, 0.78 GB |
-| `kackle -w 8` | 22.0 s, 2.1 GB | 20.0 s, 0.79 GB |
-| `kackle -w 16` | 21.9 s, 2.2 GB | 17.3 s, 0.81 GB |
-| `kackle-metaplot -w 8` | 50.8 s, 1.8 GB | 50.5 s, 0.23 GB |
-| `kackle-metaplot -w 16` | | 24.7 s, 0.22 GB |
-
-Chunk sizes of 5–25 Mb at `-w 8` were within noise (18.9–20.8 s). Main's
-`-w 4` time varies between nodes (29.9 s in the #9 job). `kackle` now
-levels off around 17–20 s, which is likely fixed costs: spawning workers,
-cut planning in the parent, and writing.
+Done (details and numbers in the CHANGELOG for 0.3.0): start arrays and a
+numba motif matcher; one pass over both strands with streamed output; large
+chromosomes split across workers (`--chunk-size`). On hg38 (PROseq_2),
+`kackle` now takes 17–30 s at `-w 4` to `-w 16` with about 0.8 GB per
+process, and levels off around 17–20 s, which is likely fixed costs:
+spawning workers, cut planning in the parent, and writing.
 
 Remaining, roughly in order of payoff:
 
@@ -248,14 +221,9 @@ figure, and show each motif spec separately instead of pooling them.
 
 ## Open questions
 
-### Corrected TGGAA sites sit slightly below their flanks (answered)
+### Peak on the C of CGG
 
-After correction, TGGAA:1 sites sit at 0.82–0.92 of their 20–50 bp flanks,
-compared with about 1.0 at TGG sites. It is not over-correction from being
-corrected twice. 57% of TGGAA:1 sites have no TGG at the same anchor (the
-mismatch is in the first three bases), and those sites have low signal at
-that base already in the uncorrected input (0.30–0.37 of the flank). Averaging
-them with the TGG-containing sites gives about 0.9. TGGAA sites that the TGG
-pass flagged look low (about 0.75) only through selection: those whose
-resampled value came out high are the ones the second pass flags again.
-(6 PRO-seq samples, hg38.)
+In raw input (PROseq_2 and PROseq_7), the C of CGG sits at about 3× its
+20–50 bp flank on the plus strand, while AGG and GGG show nothing at the
+same position. It isn't a TGG overlap. It may be biology at CpGs rather
+than this artifact; not yet checked.

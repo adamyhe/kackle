@@ -7,6 +7,24 @@ from kackle.motifs import locate_motif_specs
 from kackle.cli_common import intersect_ordered
 
 
+@pytest.fixture(autouse=True)
+def window_resampling(monkeypatch):
+    """Pin the library calls to window resampling.
+
+    These tests swap ``cli.correct_kmers`` (the window kernel) for
+    deterministic stand-ins to check pipeline mechanics; base-only
+    resampling, the default, has its own tests in test_base_resample.py.
+    """
+    for name in ("kmer_resample", "correct_bigwigs"):
+        original = getattr(cli, name)
+
+        def pinned(*args, _original=original, **kwargs):
+            kwargs.setdefault("resample", "window")
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(cli, name, pinned)
+
+
 def test_motif_bed6_fnames_are_ordered_and_descriptive():
     assert cli.motif_bed6_fnames("sites/kackle", ["TGG:0", "TGGAA:1"]) == [
         "sites/kackle.1.TGG.m0.bed6",

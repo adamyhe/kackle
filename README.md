@@ -1,7 +1,7 @@
 # kackle
 
 [![PyPI](https://img.shields.io/pypi/v/kackle)](https://pypi.org/project/kackle/)
-[![Tests](https://github.com/adamyhe/touche/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/kackle/actions/workflows/ci.yml)
+[![Tests](https://github.com/adamyhe/kackle/actions/workflows/ci.yml/badge.svg)](https://github.com/adamyhe/kackle/actions/workflows/ci.yml)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/kackle?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/kackle)
 
 Kmer Artifact Correction (KACkle) -- A small python utility for eliminating k-mer artifacts caused by primer mismatching.
@@ -72,6 +72,14 @@ output is the same as correcting whole chromosomes. `--chunk-size 0` turns
 splitting off. On hg38, a run takes about 20–30 seconds with 4–16 workers and
 under 1 GB per process.
 
+A site is flagged when the signal at its artifact base (the base just before
+the motif in RNA orientation) is more than `-r` (default 10) times the mean of
+its neighborhood (`-s`, default 10 bp on each side). By default only that
+base is replaced, with a Poisson draw from the neighborhood mean, so the
+signal around the motif keeps its shape (`--resample base`). `--resample window` restores the
+0.2.0 behavior: the whole window of `-t` (default 5) bp on each side is
+redrawn from the flanks, which also fills in natural dips at the motif.
+
 kackle processes chromosomes present in the intersection of `chrom.sizes`, both
 input bigWigs, and the FASTA file when FASTA mode is used. Chromosomes absent
 from any required source are skipped.
@@ -91,8 +99,9 @@ kackle -i plus.bw -I minus.bw -f genome.fa -o out.plus.bw -O out.minus.bw -c chr
 
 - A position is a candidate when the RNA-sense sequence that follows matches
   the adapter's 5' end for at least 3 bases with no mismatches, or 5 with one
-  (`--adapter-min-match 3,5`). The adapter may use IUPAC codes, so UMI `N`s
-  act as wildcards.
+  (`--adapter-min-match 3,5`). The adapter may use IUPAC codes. Leading
+  `N`s (such as a UMI at the start of the adapter) aren't handled yet: they
+  match every base, so nearly every position would become a candidate.
 - Stronger look-alikes are flagged at lower fold thresholds
   (`--adapter-tiers`, `LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`): exact
   matches of 4 or more bases at 7x, any match of 8 or more at 5x, 10 or more
@@ -102,14 +111,11 @@ kackle -i plus.bw -I minus.bw -f genome.fa -o out.plus.bw -O out.minus.bw -c chr
   rescreen whose background also leaves out the artifact bases flagged in the
   first stage, so a nearby spike can't hide a site. The result doesn't depend
   on site order.
-- Only the artifact base of a flagged site is replaced, with a Poisson draw
-  from its neighborhood mean (`--resample base`, implied). Natural signal
-  dips around the motif are kept.
+- As with motif passes, only the artifact base of a flagged site is replaced.
 
 `--adapter` can't be combined with `-k`, `--out-bed6-prefix` or
 `--resample window`. It assumes 3'-end tracks where the read end sits just
-before the look-alike in RNA orientation. `--resample base` also works with
-ordinary motif passes.
+before the look-alike in RNA orientation.
 
 ### Metaplots
 

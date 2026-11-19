@@ -16,7 +16,9 @@ It wraps the ``correct_kmers`` reference held by the CLI module to:
   difference, not noise. Exact mode runs the kernels as plain Python: use
   small inputs.
 
-Everything after ``--`` is passed to the kackle CLI unchanged.
+Everything after ``--`` is passed to the kackle CLI. For releases with
+``--resample`` (0.3.0 and later), ``--resample window`` is added unless the
+arguments choose a mode, because only window-mode passes are instrumented.
 """
 
 import argparse
@@ -169,6 +171,18 @@ def main():
         # are matched to chromosomes by signal length, so correct whole
         # chromosomes. Chunked output equals whole-chromosome output anyway.
         cli_args += ["--chunk-size", "0"]
+    resample = cli_args[cli_args.index("--resample") + 1] if "--resample" in cli_args[:-1] else None
+    if hasattr(module, "correct_artifact_bases") and resample is None and "--adapter" not in cli_args:
+        # Since 0.3.0 the default is base-only resampling, which doesn't go
+        # through correct_kmers. The checks here (window sums, keyed draws)
+        # are for window mode, so compare releases in window mode.
+        cli_args += ["--resample", "window"]
+    elif resample == "base" or "--adapter" in cli_args:
+        print(
+            "[run_version] warning: only window-mode passes are logged and keyed; "
+            "--resample base and --adapter runs are not",
+            file=sys.stderr,
+        )
     sys.argv = ["kackle", *cli_args]
     print(f"[run_version] kackle {kackle_version} exact={args.exact}: {' '.join(cli_args)}")
     entry_point()
