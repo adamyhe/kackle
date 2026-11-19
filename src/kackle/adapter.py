@@ -143,8 +143,9 @@ class AdapterSiteProvider:
     (``motif_specs`` holds one pseudo-spec per tier, each with the full
     adapter as its motif). A site's window is the ``len(adapter)`` bases of
     the look-alike, so a minus anchor is ``start + len(adapter)``, as for
-    motif specs. A site qualifies for a tier when its match is at least the
-    tier's length with at most its mismatches, and goes to the qualifying
+    motif specs. A site qualifies for a tier when some adapter prefix of at
+    least the tier's length matches with at most its mismatches (so an exact
+    TGGA followed by a mismatch still qualifies for ``4/0``), and goes to the qualifying
     tier with the lowest fold (the first one on a tie). Tier 0 holds sites
     that qualify for none and uses ``threshold``. A tier's minimum read
     count (``pass_min_reads``; ``None``, as for tier 0, means the run's
@@ -185,20 +186,21 @@ class AdapterSiteProvider:
     def max_motif_length(self):
         return len(self.adapter)
 
-    def _tier_of(self, lengths, mismatches):
+    def _tier_of(self, lengths):
+        """Tier per site from its ``(n, budgets)`` match lengths by mismatch budget."""
         tier = np.zeros(lengths.shape[0], dtype=np.int64)
         best = np.full(lengths.shape[0], np.inf)
+        top = lengths.shape[1] - 1
         for i, (min_len, max_mm, fold, _) in enumerate(self.tiers, start=1):
-            ok = lengths >= min_len
-            if max_mm is not None:
-                ok &= mismatches <= max_mm
+            budget = top if max_mm is None else min(max_mm, top)
+            ok = lengths[:, budget] >= min_len
             ok &= fold < best
             tier[ok] = i
             best[ok] = fold
         return tier
 
-    def _split(self, starts, lengths, mismatches):
-        tier = self._tier_of(lengths, mismatches)
+    def _split(self, starts, lengths):
+        tier = self._tier_of(lengths)
         return [starts[tier == i] for i in range(len(self.motif_specs))]
 
     def starts_for_region(self, chrom, start, end, strands=None):
@@ -222,17 +224,17 @@ class AdapterSiteProvider:
         min_match = np.array(self.min_match, dtype=np.int64)
         by_strand = {}
         if "+" in wanted:
-            lengths, mismatches = adapter_match_lengths(seq, self._masks, min_match)
-            pos = np.flatnonzero(lengths).astype(np.int64)
-            by_strand["+"] = self._split(pos + start, lengths[pos], mismatches[pos])
+            lengths = adapter_match_lengths(seq, self._masks, min_match)
+            pos = np.flatnonzero(lengths[:, -1]).astype(np.int64)
+            by_strand["+"] = self._split(pos + start, lengths[pos])
         if "-" in wanted and self.both_strands:
             rc = _COMPLEMENT[seq[::-1]]
-            lengths, mismatches = adapter_match_lengths(rc, self._masks, min_match)
-            q = np.flatnonzero(lengths).astype(np.int64)
+            lengths = adapter_match_lengths(rc, self._masks, min_match)
+            q = np.flatnonzero(lengths[:, -1]).astype(np.int64)
             # Window q of the reverse complement covers genomic
             # [start + n_windows - 1 - q, ... + k); reverse to keep starts sorted.
             genomic = start + (lengths.shape[0] - 1 - q)
-            by_strand["-"] = [a[::-1].copy() for a in self._split(genomic, lengths[q], mismatches[q])]
+            by_strand["-"] = [a[::-1].copy() for a in self._split(genomic, lengths[q])]
         for strand, arrays in by_strand.items():
             for tier, arr in enumerate(arrays):
                 out[tier][strand] = arr

@@ -18,6 +18,17 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   no tier, use `--min-reads`. `AdapterSiteProvider` tiers become 4-tuples
   (3-tuples are still accepted) and gain `pass_min_reads`.
 
+### Fixed
+
+- `--adapter` tiers with a mismatch limit (such as the default `4/0:7`)
+  missed sites whose exact prefix was followed by a mismatch and more
+  matching bases: TGGA·T… counted as a 6-base match with one mismatch, failed
+  `4/0` and fell to the base threshold. About a quarter of exact TGGA/TGGAA
+  sites were affected. A site now qualifies when any prefix of at least the
+  tier's length has at most its mismatches. `adapter_match_lengths` returns
+  the longest match for each mismatch budget. This changes default
+  `--adapter` output.
+
 ## [0.3.0] - 2026-11-18
 
 Output differs from 0.2.0: base-only resampling is now the default, and

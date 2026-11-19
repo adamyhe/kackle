@@ -35,11 +35,30 @@ def reference_length(window, adapter, min_match):
     return (last, last_mm) if cand else (0, 0)
 
 
-def reference_tier(length, mm, tiers):
-    """Index (1-based) of the qualifying tier with the lowest fold, 0 if none."""
+def reference_prefixes(window, adapter):
+    """[(length, mismatches)] for every adapter prefix that ends on a match."""
+    out, mm = [], 0
+    for k, a in enumerate(adapter):
+        b = window[k].upper() if k < len(window) else "N"
+        if b in "ACGT" and b in IUPAC[a]:
+            out.append((k + 1, mm))
+        else:
+            mm += 1
+    return out
+
+
+def reference_tier(window, adapter, min_match, tiers):
+    """Index (1-based) of the qualifying tier with the lowest fold, 0 if none.
+
+    A tier qualifies when some prefix of at least its length has at most its
+    mismatches (any number up to the candidate limit when unset).
+    """
+    top = len(min_match) - 1
+    prefixes = reference_prefixes(window, adapter)
     best, tier = float("inf"), 0
     for i, (min_len, max_mm, fold, *_) in enumerate(tiers, start=1):
-        if length >= min_len and (max_mm is None or mm <= max_mm) and fold < best:
+        limit = top if max_mm is None else min(max_mm, top)
+        if any(l >= min_len and m <= limit for l, m in prefixes) and fold < best:
             best, tier = fold, i
     return tier
 
@@ -50,9 +69,9 @@ def reference_sites(seq, adapter, min_match, tiers):
     out = {"+": [], "-": []}
     for p in range(len(seq) - k + 1):
         for strand, window in (("+", seq[p : p + k]), ("-", seq[p : p + k].translate(COMP)[::-1])):
-            length, mm = reference_length(window, adapter, min_match)
+            length, _ = reference_length(window, adapter, min_match)
             if length:
-                out[strand].append((p, reference_tier(length, mm, tiers)))
+                out[strand].append((p, reference_tier(window, adapter, min_match, tiers)))
     return out
 
 
@@ -76,12 +95,13 @@ def adapter_rich_genome(tmp_path, size=6000, seed=0, name="chr1"):
 @pytest.mark.parametrize("adapter,min_match", [(ADAPTER, (3, 5)), (ADAPTER, (4,)), ("TGGNATTC", (3, 4, 7))])
 def test_provider_matches_brute_force(tmp_path, adapter, min_match):
     fasta, seq = adapter_rich_genome(tmp_path)
-    # Overlapping tiers: exact matches of 4+ beat the any-mismatch 6+ tier.
-    tiers = ((4, 0, 4.0), (6, None, 5.0), (8, None, 3.0))
+    # Overlapping tiers: exact matches of 4+ beat the any-mismatch 6+ tier,
+    # which beats the 5/1 tier; with three budgets, 5/1 needs the middle one.
+    tiers = ((4, 0, 4.0), (5, 1, 5.5), (6, None, 5.0), (8, None, 3.0))
     provider = AdapterSiteProvider(fasta, adapter, min_match=min_match, tiers=tiers)
     want = reference_sites(seq, adapter, min_match, tiers)
     got = provider.starts_for_chrom("chr1")
-    assert len(got) == 4
+    assert len(got) == len(tiers) + 1
     if len(min_match) > 1:  # with no mismatches allowed, 4/0 takes every 6-7 match
         assert all(len(d["+"]) for d in got)
     for strand in "+-":
@@ -98,6 +118,25 @@ def test_provider_matches_brute_force(tmp_path, adapter, min_match):
             for strand in "+-":
                 w = d_all[strand]
                 assert d_reg[strand].tolist() == w[(w >= lo) & (w < hi)].tolist()
+
+
+def test_exact_tier_ignores_a_longer_match_with_a_mismatch(tmp_path):
+    # TGGA, then a mismatch, then the rest of the adapter: the longest match
+    # (12 bases, 1 mismatch) must not hide the exact 4-base prefix.
+    from kackle.adapter import adapter_masks, sequence_masks
+    from kackle.computation import adapter_match_lengths
+
+    window = "TGGACTTCTCGG"
+    lengths = adapter_match_lengths(
+        sequence_masks(window), adapter_masks(ADAPTER), np.array([3, 5], dtype=np.int64)
+    )
+    assert lengths[0].tolist() == [4, 12]
+    fasta = tmp_path / "g.fa"
+    fasta.write_text(">chr1\n" + "C" * 30 + window + "C" * 30 + "\n")
+    p = AdapterSiteProvider(fasta, tiers=((4, 0, 7.0), (12, 1, 2.0), (13, None, 1.0)))
+    assert [d["+"].tolist() for d in p.starts_for_chrom("chr1")] == [[], [], [30], []]
+    p = AdapterSiteProvider(fasta, tiers=((4, 0, 7.0), (5, None, 9.0)))
+    assert [d["+"].tolist() for d in p.starts_for_chrom("chr1")] == [[], [30], []]
 
 
 def test_parsers_and_validation(tmp_path):

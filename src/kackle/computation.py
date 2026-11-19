@@ -350,17 +350,18 @@ def correct_adapter_sites(
 
 @njit(parallel=True, cache=True)
 def adapter_match_lengths(sequence, adapter, min_match):
-    """Adapter look-alike match length and mismatches at every window start.
+    """Adapter look-alike match lengths, by mismatch budget, at every window start.
 
     ``sequence`` and ``adapter`` are IUPAC bitmasks (A=1, C=2, G=4, T=8; 0 for
     anything that is not A/C/G/T in the sequence), so a base matches when the
     masks share a bit. ``min_match[m]`` is the shortest prefix of the adapter
     that makes a candidate when it contains ``m`` mismatches; its length minus
-    one is the most mismatches allowed. Returns two int8 arrays over window
-    starts ``p`` in ``[0, len(sequence) - len(adapter)]``: the length of the
-    longest adapter prefix matched with at most that many mismatches (ending
-    on a match), and the number of mismatches inside that prefix. Both are 0
-    when the window is not a candidate.
+    one is the most mismatches allowed. Returns an int8 array of shape
+    ``(n_windows, len(min_match))`` over window starts ``p`` in
+    ``[0, len(sequence) - len(adapter)]``: entry ``[p, m]`` is the length of
+    the longest adapter prefix (ending on a match) with at most ``m``
+    mismatches, so column 0 is the exact-match length. A row is all 0 when the
+    window is not a candidate.
     """
     n = sequence.shape[0]
     k_len = adapter.shape[0]
@@ -368,27 +369,26 @@ def adapter_match_lengths(sequence, adapter, min_match):
     n_windows = n - k_len + 1
     if n_windows < 0:
         n_windows = 0
-    lengths = np.zeros(n_windows, dtype=np.int8)
-    mismatches = np.zeros(n_windows, dtype=np.int8)
+    lengths = np.zeros((n_windows, max_mm + 1), dtype=np.int8)
     for p in prange(n_windows):
         mm = 0
-        last = 0
-        last_mm = 0
         candidate = False
         for k in range(k_len):
             if sequence[p + k] & adapter[k]:
-                last = k + 1
-                last_mm = mm
-                if last >= min_match[mm]:
+                # Longest prefix ending on a match with exactly ``mm`` so far;
+                # fill every budget >= mm (later matches are longer).
+                for m in range(mm, max_mm + 1):
+                    lengths[p, m] = k + 1
+                if k + 1 >= min_match[mm]:
                     candidate = True
             else:
                 mm += 1
                 if mm > max_mm:
                     break
-        if candidate:
-            lengths[p] = last
-            mismatches[p] = last_mm
-    return lengths, mismatches
+        if not candidate:
+            for m in range(max_mm + 1):
+                lengths[p, m] = 0
+    return lengths
 
 
 # ---------------------------------------------------------------------------
