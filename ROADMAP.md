@@ -75,7 +75,31 @@ while removing every lone read, as base mode does now, over-corrects at bare
 TGG and removes only natural reads at broken-TGG sites (the TGGAA:1 variants
 without TGG), which may be part of why corrected TGGAA:1 sites sit below their
 flanks. A class-aware rule fits better: a per-tier minimum in `--adapter`
-mode, or a minimum only for mismatch classes. Not yet tried on output.
+mode, or a minimum only for mismatch classes.
+
+Tried in `--adapter` mode with per-tier minimums (`LEN[/MAXMM]:FOLD[:MINREADS]`)
+on the 6 samples, after fixing tier assignment (exact TGGA·T… sites used to
+miss `4/0` and fall to the base tier). Artifact base / flank by class:
+
+| class | input | 0.3.0 | fixed tiers | 2 reads for no-tier sites | also bare TGG |
+|---|---|---|---|---|---|
+| exact TGG | 2.83–3.88 | 0.73–0.84 | 0.73–0.84 | 0.73–0.84 | 1.26–1.63 |
+| exact TGGA | 11.5–17.8 | 1.08–1.28 | 0.97–1.15 | 0.97–1.15 | 0.96–1.13 |
+| exact TGGAA | 60.5–91.6 | 1.26–1.35 | 1.19–1.25 | 1.19–1.25 | 1.17–1.23 |
+| exact 6+ | 206–835 | 0.86–1.15 | 0.81–1.14 | 0.81–1.13 | 0.81–1.12 |
+| 1 mismatch in TGG, 5–7 bases | 1.14–1.19 | 0.45–0.50 | 0.45–0.50 | 0.80–0.90 | 0.79–0.89 |
+| 1 mismatch in TGG, 8+ | 10.8–15.8 | 0.34–0.44 | 0.34–0.44 | 0.33–0.44 | 0.34–0.43 |
+| signal removed | | 22.4–35.3% | +0.03 points | −0.26 points | −1.0 points |
+
+(`--min-reads 2 --adapter-tiers 3/0:10:1,4/0:7:1,8:5:1,10:3:1` for the
+fourth column; without the `3/0:10:1` tier for the fifth;
+`kackle_realdata/results/lowcount_validate2`.) Requiring 2 reads at no-tier
+sites changes only the short 1-mismatch class, which stops being
+over-corrected, and nothing else. Doing the same at bare TGG leaves its
+artifact in (TGG-only sites sit naturally near 0.78). The short 1-mismatch
+class is still below its input level, and its 2-read flags carry no excess
+either, so dropping it as a candidate (`--adapter-min-match 3,8`) may fit
+better still. Neither is the default yet.
 
 ### `--resample window`: resampled total isn't density-preserving when `source != 2 * target`
 
