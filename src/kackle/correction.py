@@ -232,6 +232,8 @@ def _correct_strand_signal(
     end=None,
     resample="base",
     pass_thresholds=None,
+    min_reads=1,
+    pass_min_reads=None,
 ):
     """Read, correct and sparsify one strand of a chromosome or of ``[start, end)``.
 
@@ -252,16 +254,27 @@ def _correct_strand_signal(
         thresholds = np.concatenate(
             [np.full(len(a), t, dtype=np.float64) for a, t in zip(anchor_arrays, pass_thresholds)]
         )
+        tier_min = pass_min_reads or (None,) * len(anchor_arrays)
+        site_min = np.concatenate([
+            np.full(len(a), min_reads if m is None else m, dtype=np.int64)
+            for a, m in zip(anchor_arrays, tier_min)
+        ])
         if starts.shape[0]:
-            values = correct_adapter_sites(values, starts, thresholds, source, strand)
+            values = correct_adapter_sites(
+                values, starts, thresholds, source, strand, site_min
+            )
         anchor_arrays = []
     for starts in anchor_arrays:
         if starts.shape[0] == 0:
             continue
         if resample == "base":
-            values = correct_artifact_bases(values, starts, source, threshold, strand)
+            values = correct_artifact_bases(
+                values, starts, source, threshold, strand, min_reads
+            )
         else:
-            values = correct_kmers(values, starts, source, target, threshold, strand)
+            values = correct_kmers(
+                values, starts, source, target, threshold, strand, min_reads
+            )
     positions = np.flatnonzero(values > 0).astype(np.int32)
     return positions, values[positions]
 
@@ -292,6 +305,7 @@ def _correct_chromosome(
     numba_threads=None,
     keep_sites=False,
     resample="base",
+    min_reads=1,
 ):
     """Correct one strand of one chromosome.
 
@@ -319,6 +333,7 @@ def _correct_chromosome(
         threshold,
         numba_threads if numba_threads is not None else 1,
         resample=resample,
+        min_reads=min_reads,
     )
     return chrom, positions, values, chrom_sites
 
@@ -369,6 +384,8 @@ def _correct_region_both_strands(
     keep_sites=False,
     resample="base",
     pass_thresholds=None,
+    min_reads=1,
+    pass_min_reads=None,
 ):
     """Correct both strands of one chromosome region, one strand at a time.
 
@@ -419,6 +436,8 @@ def _correct_region_both_strands(
             end=end,
             resample=resample,
             pass_thresholds=pass_thresholds,
+            min_reads=min_reads,
+            pass_min_reads=pass_min_reads,
         )
         if start:
             positions += start
@@ -599,6 +618,7 @@ def kmer_resample(
     numba_threads=None,
     verbose=True,
     resample="base",
+    min_reads=1,
 ):
     """Correct one strand-specific bigWig and return nonzero output intervals.
 
@@ -639,6 +659,8 @@ def kmer_resample(
         Whether to show a progress bar.
     resample : {"base", "window"}
         As in :func:`correct_bigwigs`.
+    min_reads : int
+        As in :func:`correct_bigwigs`.
 
     Returns
     -------
@@ -652,6 +674,7 @@ def kmer_resample(
         raise ValueError("worker_backend must be 'thread' or 'process'")
     if resample not in {"base", "window"}:
         raise ValueError("resample must be 'base' or 'window'")
+    _check_min_reads(min_reads)
     if getattr(motif_site_provider, "pass_thresholds", None) is not None:
         raise ValueError("adapter site providers are only supported by correct_bigwigs")
     motif_beds = _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider)
@@ -675,6 +698,7 @@ def kmer_resample(
             numba_threads,
             _needs_bed6_sites(motif_site_provider, chrom),
             resample,
+            min_reads,
         )
         for chrom in chroms
     }
@@ -696,6 +720,11 @@ def kmer_resample(
         collect,
     )
     return pd.concat(frames, ignore_index=True)
+
+
+def _check_min_reads(min_reads):
+    if isinstance(min_reads, bool) or int(min_reads) != min_reads or min_reads < 1:
+        raise ValueError("min_reads must be an integer >= 1")
 
 
 def _correct_chromosome_task(chrom, bw_fname, *args):
@@ -733,6 +762,7 @@ def correct_bigwigs(
     chunk_size=DEFAULT_CHUNK_SIZE,
     verbose=True,
     resample="base",
+    min_reads=1,
 ):
     """Correct both strands in one pass and stream them to bigWigs.
 
@@ -765,6 +795,10 @@ def correct_bigwigs(
         (``correct_artifact_bases``; ignores ``target``). ``"window"`` (0.2.0
         behavior) redraws whole target windows (``correct_kmers``). Adapter
         site providers always use base-only correction.
+    min_reads : int
+        Minimum count at a site's artifact base for it to be flagged, on top
+        of the fold threshold. The default, ``1``, adds nothing (a base with
+        no reads is never flagged); ``2`` keeps single reads.
     chrom_workers, worker_backend, numba_threads, verbose
         As in :func:`kmer_resample`.
     write_jobs : int, optional
@@ -775,6 +809,7 @@ def correct_bigwigs(
     """
     if worker_backend not in {"thread", "process"}:
         raise ValueError("worker_backend must be 'thread' or 'process'")
+    _check_min_reads(min_reads)
     strands = ("+", "-")
     in_bw_fnames = {strand: in_bw_fnames[strand] for strand in strands}
     motif_beds = _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider)
@@ -797,6 +832,7 @@ def correct_bigwigs(
     if resample not in {"base", "window"}:
         raise ValueError("resample must be 'base' or 'window'")
     pass_thresholds = getattr(motif_site_provider, "pass_thresholds", None)
+    pass_min_reads = getattr(motif_site_provider, "pass_min_reads", None)
 
     regions = []
     task_args = {}
@@ -833,6 +869,8 @@ def correct_bigwigs(
                 keep_sites,
                 resample,
                 pass_thresholds,
+                min_reads,
+                pass_min_reads,
             )
         last_region[chrom] = regions[-1]
         del chrom_anchors
@@ -1004,14 +1042,27 @@ def parse_args():
     )
     parser.add_argument(
         "--adapter-tiers",
-        metavar="LEN[/MAXMM]:FOLD[,...]",
-        default="4/0:7,8:5,10:3",
+        metavar="LEN[/MAXMM][:FOLD[:MINREADS]][,...]",
+        default="3/0,4/0:7,8:5,10:3",
         help=(
-            "Other fold thresholds by match: a site matching at least LEN "
-            "adapter bases (mismatched bases count toward LEN), with at most "
-            "MAXMM mismatches if given, qualifies for FOLD. A site is flagged "
-            "at the lowest FOLD it qualifies for, or --threshold if none. "
-            "Empty for none."
+            "Fold thresholds by match: a site matching at least LEN adapter "
+            "bases (mismatched bases count toward LEN), with at most MAXMM "
+            "mismatches if given, qualifies for FOLD (empty or missing: "
+            "--threshold). A site is flagged at the lowest FOLD it qualifies "
+            "for; sites that qualify for none use --threshold and "
+            "--adapter-base-min-reads. MINREADS, if given, replaces "
+            "--min-reads for that tier's sites. Empty for no tiers."
+        ),
+    )
+    parser.add_argument(
+        "--adapter-base-min-reads",
+        metavar="COUNT",
+        type=int,
+        default=2,
+        help=(
+            "Minimum artifact-base count for --adapter sites that qualify for "
+            "no tier (with the default tiers: matches of 5-7 bases with a "
+            "mismatch, whose single reads are mostly not artifacts)."
         ),
     )
     parser.add_argument(
@@ -1073,6 +1124,17 @@ def parse_args():
         help=(
             "Minimum suspicious signal at the strand-specific artifact anchor "
             "before a motif site is corrected."
+        ),
+    )
+    parser.add_argument(
+        "--min-reads",
+        metavar="COUNT",
+        type=int,
+        default=1,
+        help=(
+            "Also require at least COUNT reads at a site's artifact base to flag "
+            "it. The default, 1, adds nothing; 2 leaves single reads alone, "
+            "which a site with an empty neighborhood otherwise always fails."
         ),
     )
     parser.add_argument(
@@ -1191,6 +1253,7 @@ def run_correction():
             min_match=parse_min_match(args.adapter_min_match),
             tiers=parse_tiers(args.adapter_tiers),
             threshold=args.threshold,
+            base_min_reads=args.adapter_base_min_reads,
             both_strands=not args.only_positive_strand,
         )
     elif args.fasta:
@@ -1224,4 +1287,5 @@ def run_correction():
         chunk_size=args.chunk_size,
         verbose=args.verbose,
         resample=args.resample,
+        min_reads=args.min_reads,
     )

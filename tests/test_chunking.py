@@ -30,7 +30,7 @@ def window_resampling(monkeypatch):
 SPECS = ["TGG:0", "TGGAA:1"]
 
 
-def deterministic_correct_kmers(values, starts, source, target, threshold, strand):
+def deterministic_correct_kmers(values, starts, source, target, threshold, strand, min_reads=1):
     """``correct_kmers`` with the real screen and clustering, minus the randomness.
 
     Each cluster's span gets its width-scaled flank total spread evenly
@@ -40,7 +40,7 @@ def deterministic_correct_kmers(values, starts, source, target, threshold, stran
     out = values.copy()
     if starts.shape[0] == 0:
         return out
-    flagged = artifact_mask_parallel(values, starts, source, threshold, strand)
+    flagged = artifact_mask_parallel(values, starts, source, threshold, strand, min_reads)
     flagged_starts = np.sort(starts[flagged].astype(np.int64))
     if flagged_starts.shape[0] == 0:
         return out
