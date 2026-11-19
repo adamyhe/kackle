@@ -51,17 +51,28 @@ same per-motif metaplots on real samples, not by flag counts.
 ### Resampling flattens natural structure inside the target window
 
 The whole `[anchor - target, anchor + target)` window of a flagged site is
-redrawn from its flanks, not only the artifact base. Metaplots show the
-input's own dips near TGG sites (about 0.7 of the flank at offsets −6 to −3
-on the plus strand) raised to about 1.0 after correction, in every version.
-Resampling only the artifact base, or preserving the window's shape, would
-change every corrected site's output.
+redrawn from its flanks, not only the artifact base, so natural dips inside
+the window are filled in. The clearest case is the low signal at the motif's
+own G bases: at TGG offset +1 on the plus strand, the input sits at 0.13 of
+the 20–50 bp flank and window mode raises it to 0.33.
 
-The dips themselves are real: the raw input shows the same depletion at the
-G bases of AGG, CGG and GGG, which carry no artifact. A base-only prototype
-(`--resample base`, #14) redraws just the artifact base
+These dips are real, not a side effect of the artifact. In raw input
+(PROseq_2 and PROseq_7), AGG, CGG and GGG show the same low signal at their G
+bases (0.2–0.6 of the flank) without a spike at the base before the motif
+(0.8–1.4× the flank, against 11–17× at TGG). Their remaining spikes come from
+overlapping sequence: GGG preceded by T is a TGG site (2–3× at −2), and AAA
+after TGG makes TGGAA (about 2× at −4). CGG also has an unexplained 3× peak
+on its C, which is not a TGG overlap.
+
+Not every difference from the input is flattening. The input's dip at TGG
+offsets −5 to −2 on the plus strand (about 0.75) rises to about 1.0 in
+every mode, including base-only resampling, which only lowers flagged
+artifact bases. The rise comes from the normalization: the input's flank
+still holds other TGG sites' spikes, which correction removes.
+
+A base-only prototype (`--resample base`, #14) redraws just the artifact base
 with a Poisson draw from its neighborhood mean. On the 6 samples it changed
-nothing outside artifact bases. It kept the motif dip (TGG offset +1: input
+nothing outside artifact bases and kept the motif dip (TGG offset +1: input
 0.13, window mode 0.33, base only 0.18 of the flank). The artifact-base ratio
 stayed close to window mode (TGG 0.91–1.05 vs 0.92–1.06; TGGAA:1 0.80–0.89 vs
 0.82–0.92). It removed about 1% more of the total signal, mostly reads that
