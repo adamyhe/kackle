@@ -112,7 +112,11 @@ kackle -i plus.bw -I minus.bw -f genome.fa -o out.plus.bw -O out.minus.bw -c chr
   (`--adapter-tiers`, `LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`): exact
   matches of 4 or more bases at 7x, any match of 8 or more at 5x, 10 or more
   at 3x, everything else at `-r`. Mismatched bases count toward the length; a
-  site takes the lowest fold it qualifies for.
+  site takes the lowest fold it qualifies for. An optional `:MINREADS` gives a
+  tier its own minimum artifact-base count instead of `--min-reads`; for
+  example `--min-reads 2 --adapter-tiers 3/0:10:1,4/0:7,8:5:1,10:3:1`
+  requires 2 reads only at sites that qualify for no tier (short matches with
+  a mismatch).
 - The screen has two stages, both on the input: a plain screen, then a
   rescreen whose background also leaves out the artifact bases flagged in the
   first stage, so a nearby spike can't hide a site. The result doesn't depend

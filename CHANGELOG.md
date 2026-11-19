@@ -13,6 +13,10 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   a site is flagged only if its artifact base also has at least `N` reads.
   The default, 1, leaves output unchanged. With an empty neighborhood a
   single read passes any fold threshold; `--min-reads 2` keeps those reads.
+- `--adapter-tiers LEN[/MAXMM]:FOLD[:MINREADS]`: a tier can set its own
+  minimum artifact-base count. Tiers without one, and sites that qualify for
+  no tier, use `--min-reads`. `AdapterSiteProvider` tiers become 4-tuples
+  (3-tuples are still accepted) and gain `pass_min_reads`.
 
 ## [0.3.0] - 2026-11-18
 

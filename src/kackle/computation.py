@@ -268,7 +268,7 @@ def correct_adapter_sites(
     thresholds: np.array,
     source: np.uint = 10,
     strand: str = "+",
-    min_reads: np.int64 = 1,
+    min_reads=None,
 ) -> np.array:
     """Screen and correct all adapter look-alike sites of one strand in one pass.
 
@@ -287,7 +287,9 @@ def correct_adapter_sites(
     Poisson draw with the stage-2 mean. Every other base keeps its input value.
     Each site writes only its own artifact base and reads only the input, so
     the result does not depend on site order and the loops have no races.
-    ``starts`` must not repeat an anchor.
+    ``starts`` must not repeat an anchor. ``min_reads``, if given, is a
+    per-site int64 array: in both stages a site is flagged only if its
+    artifact base also has at least ``min_reads[i]`` reads.
     """
     out_vec = chromosome_signal_vector.copy()
     n = starts.shape[0]
@@ -308,8 +310,9 @@ def correct_adapter_sites(
         for j in range(lo, hi):
             total += chromosome_signal_vector[j]
         mean = (total - chromosome_signal_vector[idx]) / (hi - lo - 1)
+        need = 1 if min_reads is None else min_reads[i]
         if (
-            chromosome_signal_vector[idx] >= min_reads
+            chromosome_signal_vector[idx] >= need
             and chromosome_signal_vector[idx] > thresholds[i] * mean
         ):
             flag1[i] = True
@@ -336,8 +339,9 @@ def correct_adapter_sites(
         if count == 0:
             continue
         mean = total / count
+        need = 1 if min_reads is None else min_reads[i]
         if flag1[i] or (
-            chromosome_signal_vector[idx] >= min_reads
+            chromosome_signal_vector[idx] >= need
             and chromosome_signal_vector[idx] > thresholds[i] * mean
         ):
             out_vec[idx] = np.random.poisson(mean)

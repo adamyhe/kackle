@@ -61,7 +61,7 @@ def test_correction_kernels_keep_reads_below_min_reads(strand):
     thr = np.full(3, 10.0)
     outs = {
         "base": correct_artifact_bases(signal, starts, 10, 10, strand, 2),
-        "adapter": correct_adapter_sites(signal, starts, thr, 10, strand, 2),
+        "adapter": correct_adapter_sites(signal, starts, thr, 10, strand, np.full(3, 2)),
         # Window mode redraws [anchor - 5, anchor + 5) from an empty flank.
         "window": correct_kmers(signal, starts, 10, 5, 10, strand, 2),
     }
@@ -79,7 +79,10 @@ def test_adapter_rescreen_also_requires_min_reads():
     signal[starts - 1] = [500, 1]
     thr = np.full(2, 10.0)
     assert correct_adapter_sites(signal, starts, thr, 10, "+")[62] == 0
-    assert correct_adapter_sites(signal, starts, thr, 10, "+", 2)[62] == 1
+    assert correct_adapter_sites(signal, starts, thr, 10, "+", np.full(2, 2))[62] == 1
+    # Per site: only the 1's own minimum matters.
+    assert correct_adapter_sites(signal, starts, thr, 10, "+", np.array([1, 2]))[62] == 1
+    assert correct_adapter_sites(signal, starts, thr, 10, "+", np.array([9, 1]))[62] == 0
 
 
 def test_pipeline_min_reads(tmp_path):

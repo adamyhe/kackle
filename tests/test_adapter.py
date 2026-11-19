@@ -38,7 +38,7 @@ def reference_length(window, adapter, min_match):
 def reference_tier(length, mm, tiers):
     """Index (1-based) of the qualifying tier with the lowest fold, 0 if none."""
     best, tier = float("inf"), 0
-    for i, (min_len, max_mm, fold) in enumerate(tiers, start=1):
+    for i, (min_len, max_mm, fold, *_) in enumerate(tiers, start=1):
         if length >= min_len and (max_mm is None or mm <= max_mm) and fold < best:
             best, tier = fold, i
     return tier
@@ -102,10 +102,14 @@ def test_provider_matches_brute_force(tmp_path, adapter, min_match):
 
 def test_parsers_and_validation(tmp_path):
     assert parse_min_match("3,5") == (3, 5)
-    assert parse_tiers("10:3,8:5") == ((8, None, 5.0), (10, None, 3.0))
-    assert parse_tiers("8:5,4/0:7,4:9") == ((4, 0, 7.0), (4, None, 9.0), (8, None, 5.0))
+    assert parse_tiers("10:3,8:5") == ((8, None, 5.0, None), (10, None, 3.0, None))
+    assert parse_tiers("8:5,4/0:7,4:9") == (
+        (4, 0, 7.0, None), (4, None, 9.0, None), (8, None, 5.0, None)
+    )
+    assert parse_tiers("3/0:10:1,8:5:2") == ((3, 0, 10.0, 1), (8, None, 5.0, 2))
     assert parse_tiers("") == ()
-    for bad in ("8", "8:5,8:3", "4/0:7,4/0:5", "4/x:7", "0:5", "4/-1:5", "4:0"):
+    for bad in ("8", "8:5,8:3", "4/0:7,4/0:5", "4/x:7", "0:5", "4/-1:5", "4:0",
+                "4:7:0", "4:7:x", "4:7:1:1", "4:7:1.5", "4/0:7:1,4/0:5:2"):
         with pytest.raises(ValueError):
             parse_tiers(bad)
     for bad in ("", "5,3", "0"):
@@ -116,6 +120,9 @@ def test_parsers_and_validation(tmp_path):
     fasta, _ = adapter_rich_genome(tmp_path)
     p = AdapterSiteProvider(fasta, tiers=((8, 5), (10, 3)), threshold=10)
     assert p.pass_thresholds == (10.0, 5.0, 3.0)
+    assert p.pass_min_reads == (None, None, None)
+    p = AdapterSiteProvider(fasta, tiers=((8, None, 5, 2), (10, 3)), threshold=10)
+    assert p.pass_min_reads == (None, 2, None)
     assert p.max_motif_length == 12
 
 
@@ -143,8 +150,8 @@ def test_single_pass_screen_rescreens_without_flagged_sites(strand):
     assert flagged.mean() < 2
 
 
-def spiky_inputs(tmp_path, provider, chrom_sizes):
-    """Spikes on an empty background at sites with no other site within 2 * source."""
+def spiky_inputs(tmp_path, provider, chrom_sizes, value=50):
+    """Spikes of ``value`` on an empty background at sites with no other site within 2 * source."""
     paths = {}
     for strand, sign in (("+", 1.0), ("-", -1.0)):
         rows = []
@@ -155,7 +162,7 @@ def spiky_inputs(tmp_path, provider, chrom_sizes):
             gaps = np.diff(anchors)
             lone = anchors[1:-1][(gaps[:-1] > 20) & (gaps[1:] > 20)]
             vals = np.zeros(size)
-            vals[lone - 1 if strand == "+" else lone] = 50
+            vals[lone - 1 if strand == "+" else lone] = value
             far = np.ones(size, bool)
             for a in anchors:
                 far[max(a - 25, 0) : a + 25] = False
@@ -187,6 +194,30 @@ def test_adapter_mode_chunked_matches_whole(tmp_path, backend, workers):
         inp = np.abs(read_chrom_values(inputs[s], "chr1"))
         assert (inp == 50).sum() > 20
         assert np.array_equal(got, np.where(inp == 50, 0, inp))
+
+
+def test_adapter_tier_min_reads(tmp_path):
+    # Single reads at lone sites: --min-reads 2 keeps them, except in the tier
+    # that sets its own minimum of 1 (exact matches of 4+).
+    fasta, seq = adapter_rich_genome(tmp_path, size=20_000)
+    chrom_sizes = [("chr1", len(seq))]
+    provider = AdapterSiteProvider(fasta, tiers=((4, 0, 7.0, 1), (8, None, 5.0)))
+    inputs = spiky_inputs(tmp_path, provider, chrom_sizes, value=1)
+    out = {s: tmp_path / f"out{s}.bw" for s in "+-"}
+    cli.correct_bigwigs(inputs, out, chrom_sizes, motif_site_provider=provider,
+                        chunk_size=1_500, verbose=False, min_reads=2)
+    tiers = provider.starts_for_chrom("chr1")
+    for s in "+-":
+        art = [t[s] + 12 if s == "-" else t[s] - 1 for t in tiers]
+        got = read_chrom_values(out[s], "chr1")
+        inp = np.abs(read_chrom_values(inputs[s], "chr1"))
+        hit = [a[inp[a] == 1] for a in art]
+        assert all(h.size > 3 for h in hit)
+        assert np.all(got[hit[1]] == 0)  # own minimum of 1
+        assert np.all(got[hit[0]] == 1) and np.all(got[hit[2]] == 1)  # --min-reads 2
+        keep = np.ones(inp.size, bool)
+        keep[hit[1]] = False
+        assert np.array_equal(got[keep], inp[keep])
 
 
 def test_cli_rejects_bad_adapter_combinations(monkeypatch, tmp_path):

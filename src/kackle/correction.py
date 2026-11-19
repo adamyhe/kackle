@@ -233,6 +233,7 @@ def _correct_strand_signal(
     resample="base",
     pass_thresholds=None,
     min_reads=1,
+    pass_min_reads=None,
 ):
     """Read, correct and sparsify one strand of a chromosome or of ``[start, end)``.
 
@@ -253,9 +254,14 @@ def _correct_strand_signal(
         thresholds = np.concatenate(
             [np.full(len(a), t, dtype=np.float64) for a, t in zip(anchor_arrays, pass_thresholds)]
         )
+        tier_min = pass_min_reads or (None,) * len(anchor_arrays)
+        site_min = np.concatenate([
+            np.full(len(a), min_reads if m is None else m, dtype=np.int64)
+            for a, m in zip(anchor_arrays, tier_min)
+        ])
         if starts.shape[0]:
             values = correct_adapter_sites(
-                values, starts, thresholds, source, strand, min_reads
+                values, starts, thresholds, source, strand, site_min
             )
         anchor_arrays = []
     for starts in anchor_arrays:
@@ -379,6 +385,7 @@ def _correct_region_both_strands(
     resample="base",
     pass_thresholds=None,
     min_reads=1,
+    pass_min_reads=None,
 ):
     """Correct both strands of one chromosome region, one strand at a time.
 
@@ -430,6 +437,7 @@ def _correct_region_both_strands(
             resample=resample,
             pass_thresholds=pass_thresholds,
             min_reads=min_reads,
+            pass_min_reads=pass_min_reads,
         )
         if start:
             positions += start
@@ -824,6 +832,7 @@ def correct_bigwigs(
     if resample not in {"base", "window"}:
         raise ValueError("resample must be 'base' or 'window'")
     pass_thresholds = getattr(motif_site_provider, "pass_thresholds", None)
+    pass_min_reads = getattr(motif_site_provider, "pass_min_reads", None)
 
     regions = []
     task_args = {}
@@ -861,6 +870,7 @@ def correct_bigwigs(
                 resample,
                 pass_thresholds,
                 min_reads,
+                pass_min_reads,
             )
         last_region[chrom] = regions[-1]
         del chrom_anchors
@@ -1032,14 +1042,16 @@ def parse_args():
     )
     parser.add_argument(
         "--adapter-tiers",
-        metavar="LEN[/MAXMM]:FOLD[,...]",
+        metavar="LEN[/MAXMM]:FOLD[:MINREADS][,...]",
         default="4/0:7,8:5,10:3",
         help=(
             "Other fold thresholds by match: a site matching at least LEN "
             "adapter bases (mismatched bases count toward LEN), with at most "
             "MAXMM mismatches if given, qualifies for FOLD. A site is flagged "
             "at the lowest FOLD it qualifies for, or --threshold if none. "
-            "Empty for none."
+            "MINREADS, if given, replaces --min-reads for that tier's sites "
+            "(e.g. 3/0:10:1 with --min-reads 2 keeps exact-TGG sites at 1 "
+            "while sites that qualify for no tier need 2). Empty for none."
         ),
     )
     parser.add_argument(
