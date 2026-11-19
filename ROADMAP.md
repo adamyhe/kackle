@@ -97,9 +97,23 @@ fourth column; without the `3/0:10:1` tier for the fifth;
 sites changes only the short 1-mismatch class, which stops being
 over-corrected, and nothing else. Doing the same at bare TGG leaves its
 artifact in (TGG-only sites sit naturally near 0.78). The short 1-mismatch
-class is still below its input level, and its 2-read flags carry no excess
-either, so dropping it as a candidate (`--adapter-min-match 3,8`) may fit
-better still. Neither is the default yet.
+class is still below its input level.
+
+Dropping that class as candidates instead (`--adapter-min-match 3,8`, default
+tiers; `results/lowcount_validate3`) goes too far: it leaves the class at
+1.59–1.91 of its (corrected) flank, above every corrected exact class, and
+removes about 1 point less signal (as much as the bare-TGG minimum). Other
+classes are unchanged. The input ratio (1.14–1.19) understates the class
+because the input's flanks still hold other sites' spikes.
+
+**The AGG/CGG/GGG control is not artifact-free.** They are one-mismatch TGG
+look-alikes, and on an empty background they have 1.4–1.5× the lone-read
+rate of all positions. Against all positions instead, the artifact share of
+lone reads is about 70% at bare TGG, 91% at TGGA, 95% at TGGAA, and 23–26%
+(1 and 2 reads) at short 1-mismatch sites, so the shares in the table above
+are lower bounds. The short 1-mismatch class carries a weak artifact: a
+2-read minimum there is a middle ground between removing every flagged read
+(0.45–0.50) and none (1.59–1.91). Neither is the default yet.
 
 ### `--resample window`: resampled total isn't density-preserving when `source != 2 * target`
 
