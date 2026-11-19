@@ -76,6 +76,43 @@ kackle processes chromosomes present in the intersection of `chrom.sizes`, both
 input bigWigs, and the FASTA file when FASTA mode is used. Chromosomes absent
 from any required source are skipped.
 
+### Adapter look-alike sites (`--adapter`, experimental)
+
+The TGG artifact comes from RT primer mispriming on stretches of real
+fragments that resemble the 3' adapter: the read ends on the base just before
+the look-alike, and the spike grows with how much of the adapter matches.
+Instead of fixed motif passes, `--adapter` derives the sites from the
+adapter sequence and screens them all in one pass:
+
+```bash
+kackle -i plus.bw -I minus.bw -f genome.fa -o out.plus.bw -O out.minus.bw -c chrom.sizes \
+  --adapter TGGAATTCTCGG
+```
+
+- A position is a candidate when the RNA-sense sequence that follows matches
+  the adapter's 5' end for at least 3 bases with no mismatches, or 5 with one
+  (`--adapter-min-match 3,5`). The adapter may use IUPAC codes, so UMI `N`s
+  act as wildcards.
+- Stronger look-alikes are flagged at lower fold thresholds
+  (`--adapter-tiers`, `LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`): exact
+  matches of 4 or more bases at 7x, any match of 8 or more at 5x, 10 or more
+  at 3x, everything else at `-r`. Mismatched bases count toward the length; a
+  site takes the lowest fold it qualifies for.
+- The screen has two stages, both on the input: a plain screen, then a
+  rescreen whose background also leaves out the artifact bases flagged in the
+  first stage, so a nearby spike can't hide a site. The result doesn't depend
+  on site order.
+- Only the artifact base of a flagged site is replaced, with a Poisson draw
+  from its neighborhood mean (`--resample base`, implied). Natural signal
+  dips around the motif are kept.
+
+`--adapter` can't be combined with `-k`, `--out-bed6-prefix` or
+`--resample window`. It assumes 3'-end tracks where the read end sits just
+before the look-alike in RNA orientation. `--resample base` also works with
+ordinary motif passes.
+
+### Metaplots
+
 Generate before/after metaplots centered on motif starts:
 
 ```bash

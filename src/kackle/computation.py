@@ -201,6 +201,175 @@ def correct_kmers(
     return out_vec
 
 
+@njit(parallel=True, cache=True)
+def correct_artifact_bases(
+    chromosome_signal_vector: np.array,
+    starts: np.array,
+    source: np.uint = 10,
+    threshold: np.uint = 10,
+    strand: str = "+",
+) -> np.array:
+    """Redraw only the artifact base of each flagged site.
+
+    Screening is the same as in ``correct_kmers``. For each flagged anchor,
+    the strand-appropriate artifact base (plus: ``anchor - 1``; minus:
+    ``anchor``) is replaced with a Poisson draw whose mean is the mean of the
+    rest of its ``[anchor - source, anchor + source)`` neighborhood, leaving
+    out the artifact bases of other flagged sites. Every other base keeps
+    its input value, so natural structure around the motif is untouched.
+    Each flagged site writes only its own artifact base and reads only the
+    input vector, so the parallel loop has no races.
+    """
+    out_vec = chromosome_signal_vector.copy()
+    if starts.shape[0] == 0:
+        return out_vec
+    flagged = artifact_mask_parallel(
+        chromosome_signal_vector, starts, source, threshold, strand
+    )
+    offset = 1 if strand == "+" else 0
+    art = np.sort(starts[flagged].astype(np.int64)) - offset
+    n = art.shape[0]
+    for i in prange(n):
+        idx = art[i]
+        anchor = idx + offset
+        lo = anchor - source
+        hi = anchor + source
+        total = 0
+        count = 0
+        k_lo = np.searchsorted(art, lo)
+        k = k_lo
+        for j in range(lo, hi):
+            # Skip this and other flagged sites' artifact bases.
+            while k < n and art[k] < j:
+                k += 1
+            if k < n and art[k] == j:
+                continue
+            total += chromosome_signal_vector[j]
+            count += 1
+        mean = total / count if count > 0 else 0.0
+        out_vec[idx] = np.random.poisson(mean)
+    return out_vec
+
+
+@njit(parallel=True, cache=True)
+def correct_adapter_sites(
+    chromosome_signal_vector: np.array,
+    starts: np.array,
+    thresholds: np.array,
+    source: np.uint = 10,
+    strand: str = "+",
+) -> np.array:
+    """Screen and correct all adapter look-alike sites of one strand in one pass.
+
+    Each anchor's artifact base (plus: ``anchor - 1``; minus: ``anchor``) is
+    compared with the mean of its ``[anchor - source, anchor + source)``
+    neighborhood in two stages, both on the input signal:
+
+    1. a plain screen: the background is the rest of the neighborhood, and a
+       site is flagged when its artifact base exceeds ``thresholds[i]`` times
+       that mean;
+    2. a rescreen whose background also leaves out the artifact bases of the
+       sites flagged in stage 1, so a nearby spike no longer hides a site.
+       Candidates that stage 1 did not flag stay in the background.
+
+    A site flagged in either stage has its artifact base replaced with a
+    Poisson draw with the stage-2 mean. Every other base keeps its input value.
+    Each site writes only its own artifact base and reads only the input, so
+    the result does not depend on site order and the loops have no races.
+    ``starts`` must not repeat an anchor.
+    """
+    out_vec = chromosome_signal_vector.copy()
+    n = starts.shape[0]
+    if n == 0:
+        return out_vec
+    length = chromosome_signal_vector.shape[0]
+    offset = 1 if strand == "+" else 0
+    # Stage 1: plain screen.
+    flag1 = np.zeros(n, dtype=np.bool_)
+    for i in prange(n):
+        anchor = np.int64(starts[i])
+        idx = anchor - offset
+        lo = anchor - source
+        hi = anchor + source
+        if lo < 0 or hi > length:
+            continue
+        total = 0.0
+        for j in range(lo, hi):
+            total += chromosome_signal_vector[j]
+        mean = (total - chromosome_signal_vector[idx]) / (hi - lo - 1)
+        if chromosome_signal_vector[idx] > thresholds[i] * mean:
+            flag1[i] = True
+    art = np.sort(starts[flag1].astype(np.int64)) - offset
+    m = art.shape[0]
+    # Stage 2: rescreen without stage-1 flagged artifact bases.
+    for i in prange(n):
+        anchor = np.int64(starts[i])
+        idx = anchor - offset
+        lo = anchor - source
+        hi = anchor + source
+        if lo < 0 or hi > length:
+            continue
+        total = 0.0
+        count = 0
+        k = np.searchsorted(art, lo)
+        for j in range(lo, hi):
+            while k < m and art[k] < j:
+                k += 1
+            if j == idx or (k < m and art[k] == j):
+                continue
+            total += chromosome_signal_vector[j]
+            count += 1
+        if count == 0:
+            continue
+        mean = total / count
+        if flag1[i] or chromosome_signal_vector[idx] > thresholds[i] * mean:
+            out_vec[idx] = np.random.poisson(mean)
+    return out_vec
+
+
+@njit(parallel=True, cache=True)
+def adapter_match_lengths(sequence, adapter, min_match):
+    """Adapter look-alike match length and mismatches at every window start.
+
+    ``sequence`` and ``adapter`` are IUPAC bitmasks (A=1, C=2, G=4, T=8; 0 for
+    anything that is not A/C/G/T in the sequence), so a base matches when the
+    masks share a bit. ``min_match[m]`` is the shortest prefix of the adapter
+    that makes a candidate when it contains ``m`` mismatches; its length minus
+    one is the most mismatches allowed. Returns two int8 arrays over window
+    starts ``p`` in ``[0, len(sequence) - len(adapter)]``: the length of the
+    longest adapter prefix matched with at most that many mismatches (ending
+    on a match), and the number of mismatches inside that prefix. Both are 0
+    when the window is not a candidate.
+    """
+    n = sequence.shape[0]
+    k_len = adapter.shape[0]
+    max_mm = min_match.shape[0] - 1
+    n_windows = n - k_len + 1
+    if n_windows < 0:
+        n_windows = 0
+    lengths = np.zeros(n_windows, dtype=np.int8)
+    mismatches = np.zeros(n_windows, dtype=np.int8)
+    for p in prange(n_windows):
+        mm = 0
+        last = 0
+        last_mm = 0
+        candidate = False
+        for k in range(k_len):
+            if sequence[p + k] & adapter[k]:
+                last = k + 1
+                last_mm = mm
+                if last >= min_match[mm]:
+                    candidate = True
+            else:
+                mm += 1
+                if mm > max_mm:
+                    break
+        if candidate:
+            lengths[p] = last
+            mismatches[p] = last_mm
+    return lengths, mismatches
+
+
 # ---------------------------------------------------------------------------
 # Motif matching
 # ---------------------------------------------------------------------------
