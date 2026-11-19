@@ -56,6 +56,12 @@ you pass `-w`, so every pass runs in-process where the wrapper can see it.
 
 ## Known differences between releases
 
+Since v0.3.0 the default is base-only resampling (`--resample base`), which
+the harness doesn't instrument. `run_version.py` therefore adds
+`--resample window` for releases that have the flag, unless the arguments
+already choose a mode, so comparisons against older releases stay
+like-for-like.
+
 Since v0.2.0, nearby flagged sites are resampled together as one cluster
 instead of one window each, so clustered windows also differ between v0.2.0
 and later releases. Isolated windows still match.

@@ -107,3 +107,13 @@ def test_base_mode_chunked_matches_whole(tmp_path, backend, workers):
             inp = np.abs(read_chrom_values(inputs[s], chrom))
             assert inp.max() == 50 and got.max() == 1
             assert np.array_equal(got, np.where(inp == 50, 0, inp))
+
+
+def test_base_is_the_default_resampling():
+    import inspect
+
+    for fn in (cli.kmer_resample, cli.correct_bigwigs):
+        assert inspect.signature(fn).parameters["resample"].default == "base"
+    for bad in ("Window", "", None):
+        with pytest.raises(ValueError):
+            cli.kmer_resample("x.bw", motif_beds=[], chroms=["chr1"], resample=bad, verbose=False)

@@ -230,7 +230,7 @@ def _correct_strand_signal(
     n_jobs,
     start=0,
     end=None,
-    resample="window",
+    resample="base",
     pass_thresholds=None,
 ):
     """Read, correct and sparsify one strand of a chromosome or of ``[start, end)``.
@@ -291,6 +291,7 @@ def _correct_chromosome(
     isolate_fasta_provider=False,
     numba_threads=None,
     keep_sites=False,
+    resample="base",
 ):
     """Correct one strand of one chromosome.
 
@@ -317,6 +318,7 @@ def _correct_chromosome(
         target,
         threshold,
         numba_threads if numba_threads is not None else 1,
+        resample=resample,
     )
     return chrom, positions, values, chrom_sites
 
@@ -365,7 +367,7 @@ def _correct_region_both_strands(
     isolate_fasta_provider=False,
     numba_threads=None,
     keep_sites=False,
-    resample="window",
+    resample="base",
     pass_thresholds=None,
 ):
     """Correct both strands of one chromosome region, one strand at a time.
@@ -596,6 +598,7 @@ def kmer_resample(
     worker_backend="thread",
     numba_threads=None,
     verbose=True,
+    resample="base",
 ):
     """Correct one strand-specific bigWig and return nonzero output intervals.
 
@@ -621,7 +624,8 @@ def kmer_resample(
     chroms : sequence[str], optional
         Chromosomes to process. Defaults to human autosomes plus chrX/chrY.
     source, target, threshold : int
-        Parameters forwarded to ``correct_kmers``.
+        Background half-window, window-mode correction half-window, and fold
+        threshold (see ``correct_kmers`` and ``correct_artifact_bases``).
     chrom_workers : int
         Number of chromosomes to correct concurrently. Each worker opens its
         own bigWig handle. Use ``1`` to disable cross-chromosome parallelism.
@@ -633,6 +637,8 @@ def kmer_resample(
         Threads available to numba inside each chromosome worker.
     verbose : bool
         Whether to show a progress bar.
+    resample : {"base", "window"}
+        As in :func:`correct_bigwigs`.
 
     Returns
     -------
@@ -644,6 +650,8 @@ def kmer_resample(
         raise ValueError("Strand must be '+' or '-'")
     if worker_backend not in {"thread", "process"}:
         raise ValueError("worker_backend must be 'thread' or 'process'")
+    if resample not in {"base", "window"}:
+        raise ValueError("resample must be 'base' or 'window'")
     if getattr(motif_site_provider, "pass_thresholds", None) is not None:
         raise ValueError("adapter site providers are only supported by correct_bigwigs")
     motif_beds = _resolve_motif_beds(bed6_fname, motif_beds, motif_site_provider)
@@ -666,6 +674,7 @@ def kmer_resample(
             parallel,
             numba_threads,
             _needs_bed6_sites(motif_site_provider, chrom),
+            resample,
         )
         for chrom in chroms
     }
@@ -723,7 +732,7 @@ def correct_bigwigs(
     write_jobs=None,
     chunk_size=DEFAULT_CHUNK_SIZE,
     verbose=True,
-    resample="window",
+    resample="base",
 ):
     """Correct both strands in one pass and stream them to bigWigs.
 
@@ -748,11 +757,14 @@ def correct_bigwigs(
         a provider with ``starts_for_region`` (``FastaMotifSiteProvider``);
         other providers get whole chromosomes.
     source, target, threshold : int
-        Parameters forwarded to ``correct_kmers``.
-    resample : {"window", "base"}
-        ``"window"`` resamples whole target windows (``correct_kmers``);
-        ``"base"`` redraws only each flagged site's artifact base
-        (``correct_artifact_bases``; experimental, ignores ``target``).
+        Background half-window, window-mode correction half-window, and fold
+        threshold (see ``correct_kmers`` and ``correct_artifact_bases``).
+    resample : {"base", "window"}
+        ``"base"`` (the default) replaces only each flagged site's artifact
+        base with a Poisson draw from its local mean
+        (``correct_artifact_bases``; ignores ``target``). ``"window"`` (0.2.0
+        behavior) redraws whole target windows (``correct_kmers``). Adapter
+        site providers always use base-only correction.
     chrom_workers, worker_backend, numba_threads, verbose
         As in :func:`kmer_resample`.
     write_jobs : int, optional
@@ -782,6 +794,8 @@ def correct_bigwigs(
         else dict.fromkeys(chroms)
     )
     reach = max(source, target)
+    if resample not in {"base", "window"}:
+        raise ValueError("resample must be 'base' or 'window'")
     pass_thresholds = getattr(motif_site_provider, "pass_thresholds", None)
 
     regions = []
@@ -1045,7 +1059,10 @@ def parse_args():
         metavar="BP",
         type=int,
         default=5,
-        help=("Half-window size around a candidate motif resampled during correction."),
+        help=(
+            "Half-window size around a flagged site redrawn during correction "
+            "(--resample window only)."
+        ),
     )
     parser.add_argument(
         "-r",
@@ -1060,13 +1077,13 @@ def parse_args():
     )
     parser.add_argument(
         "--resample",
-        choices=("window", "base"),
-        default=None,
+        choices=("base", "window"),
+        default="base",
         help=(
-            "What to redraw at a flagged site: 'window' (the default, except "
-            "with --adapter) resamples the whole target window from the "
-            "flanks; 'base' (experimental) redraws only the artifact base "
-            "from its local mean."
+            "What to redraw at a flagged site: 'base' (the default) replaces "
+            "only the artifact base with a Poisson draw from its local mean; "
+            "'window' (0.2.0 behavior) redraws the whole target window from "
+            "the flanks. --adapter needs 'base'."
         ),
     )
     parser.add_argument(
@@ -1125,9 +1142,6 @@ def parse_args():
             parser.error("--adapter can't be combined with -k or --out-bed6-prefix")
         if args.resample == "window":
             parser.error("--adapter uses base-only resampling")
-        args.resample = "base"
-    elif args.resample is None:
-        args.resample = "window"
     if args.bed6 and args.motif:
         parser.error("--motif can only be used with --fasta")
     if args.bed6 and args.only_positive_strand:

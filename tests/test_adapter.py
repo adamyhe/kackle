@@ -199,4 +199,6 @@ def test_cli_rejects_bad_adapter_combinations(monkeypatch, tmp_path):
     monkeypatch.setattr("sys.argv", base + ["-f", "g", "--adapter", ADAPTER])
     assert cli.parse_args().resample == "base"
     monkeypatch.setattr("sys.argv", base + ["-f", "g"])
+    assert cli.parse_args().resample == "base"
+    monkeypatch.setattr("sys.argv", base + ["-f", "g", "--resample", "window"])
     assert cli.parse_args().resample == "window"

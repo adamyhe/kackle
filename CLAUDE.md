@@ -47,8 +47,8 @@ many bases, default 10 Mb; `0` = whole chromosomes; `kackle-metaplot` has it too
 `--worker-backend` (`process` default, spawned, or `thread`),
 `--numba-threads` (default `auto`), `-k/--motif KMER[:MISMATCHES]` (repeatable, FASTA mode only,
 defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-mode motif sites),
-`--resample` (`window`, the default for motif passes, or `base`), `--adapter SEQ` (FASTA mode, replaces
-`-k`; implies `--resample base`) with `--adapter-min-match` (default `3,5`) and `--adapter-tiers`
+`--resample` (`base`, the default since 0.3.0, or `window`), `--adapter SEQ` (FASTA mode, replaces
+`-k`; needs `--resample base`) with `--adapter-min-match` (default `3,5`) and `--adapter-tiers`
 (`LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`), `-v/--verbose` (progress bars).
 
 `uv run python benchmarks/motif_backends.py` reproduces FASTA motif-matching backend timings.
@@ -56,7 +56,8 @@ defaults to `TGG:0` then `TGGAA:1`), `--out-bed6-prefix` (dump generated FASTA-m
 `scripts/compare_versions/` compares two git refs' outputs on the same inputs (`compare.sh -a REF -b
 REF`, `-x` for exact mode: no JIT, RNG keyed per anchor, small inputs only); see its README. It's the
 main regression check for changes to the correction pipeline: anchors must match, nothing may change
-outside motif windows, and isolated windows must keep their sums.
+outside motif windows, and isolated windows must keep their sums. It compares in window mode
+(`--resample window`), the only mode it instruments.
 
 ## Architecture
 
@@ -129,10 +130,16 @@ For each strand (of each chunk):
    - Opens a `figwig.BigWigReader` and reads the whole chromosome as one dense window
      (`read_chrom_values()` in `bigwig.py`), converting minus-strand values to absolute counts.
    - Applies motif passes **sequentially** — each entry in `motif_specs`/`motif_beds` is one full
-     `correct_kmers()` call over the array, so e.g. the default `TGG:0` pass runs and its output
+     kernel call over the array (`correct_artifact_bases()` by default, `correct_kmers()` with
+     `resample="window"`), so e.g. the default `TGG:0` pass runs and its output
      feeds the subsequent `TGGAA:1` pass. This ordering is deliberate (short exact matches corrected
      before longer fuzzy ones) and must be preserved.
-   - `correct_kmers()` (`computation.py`, `njit(parallel=True)`) runs in three steps:
+   - Default (`resample="base"`): `correct_artifact_bases()` screens every anchor with
+     `artifact_mask_parallel` (below), then replaces only each flagged artifact base with a Poisson
+     draw from the mean of its `[anchor - source, anchor + source)` neighborhood without any
+     flagged artifact base. Each site writes one base, so there are no races; `target` is unused.
+   - `resample="window"` (0.2.0 behavior): `correct_kmers()` (`computation.py`,
+     `njit(parallel=True)`) runs in three steps:
      1. **Screen** every candidate anchor against the pass's input (`artifact_mask_parallel`):
         flag it if the strand-appropriate artifact position exceeds
         `threshold * local_background` over its `[anchor - source, anchor + source)` neighborhood.
@@ -146,9 +153,6 @@ For each strand (of each chunk):
      Only target spans are modified. Don't reintroduce per-site write-back of overlapping
      windows (v0.1.0 wrote full source windows and v0.2.0 wrote overlapping target windows, and
      both raced and leaked spikes).
-   - With `--resample base`, each pass calls `correct_artifact_bases()` instead: same screen, then
-     only each flagged artifact base is replaced with a Poisson draw from the mean of its
-     neighborhood without any flagged artifact base.
    - With `--adapter` (the provider has `pass_thresholds`), the tiers' anchor arrays are concatenated
      with per-site thresholds and corrected in **one** `correct_adapter_sites()` call: a plain screen,
      then a rescreen whose background also leaves out stage-1-flagged artifact bases; a site flagged
@@ -160,6 +164,11 @@ For each strand (of each chunk):
    written to both output bigWigs as soon as every earlier chromosome in `chrom_sizes` order is done
    (`_run_chromosomes` buffers out-of-order results). No genome-wide table is built.
    `kmer_resample()` instead collects one strand into a DataFrame.
+
+Pipeline tests that swap `cli.correct_kmers` for deterministic stand-ins pin `resample="window"`
+with an autouse fixture (`tests/test_chunking.py`, `tests/test_cli.py`); base mode has its own
+chunked == whole tests. The comparison harness adds `--resample window` for releases that have the
+flag, because it only instruments `correct_kmers`.
 
 `resample_empirical()` (IQR-based resampling from the local empirical distribution) exists as an
 alternate strategy but is **not** wired into `correct_kmers()` — swap it in there if changing the
