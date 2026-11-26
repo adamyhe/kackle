@@ -1027,7 +1027,8 @@ def parse_args():
             "adapter sequence (IUPAC; e.g. TGGAATTCTCGG) instead of -k motifs, "
             "and correct them in one pass with base-only resampling. A site is "
             "a position whose sequence matches the adapter's 5' end for at "
-            "least --adapter-min-match bases."
+            "least --adapter-min-match bases. Leading Ns (a UMI) are part of "
+            "the look-alike but don't count toward match length."
         ),
     )
     parser.add_argument(

@@ -17,6 +17,10 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   minimum artifact-base count. Tiers without one, and sites that qualify for
   no tier, use `--min-reads`. `AdapterSiteProvider` tiers become 4-tuples
   (3-tuples are still accepted) and gain `pass_min_reads`.
+- `--adapter` handles leading `N`s (a UMI, as in `NNNNNNTGGAATTCTCGG`):
+  they stay in the look-alike window, so the artifact base is the base before
+  the UMI, but are not compared and don't count toward match lengths. Before,
+  `N` matched every base and nearly every position became a candidate.
 
 ### Changed
 

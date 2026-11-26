@@ -19,13 +19,23 @@ ADAPTER = "TGGAATTCTCGG"
 COMP = str.maketrans("ACGTacgtN", "TGCAtgcaN")
 
 
+def leading_ns(adapter):
+    return len(adapter) - len(adapter.lstrip("N"))
+
+
 def reference_length(window, adapter, min_match):
-    """Pure-Python (match length, mismatches in it), (0, 0) if not a candidate."""
+    """Pure-Python (match length, mismatches in it), (0, 0) if not a candidate.
+
+    Leading adapter ``N``s are not compared and lengths count from after them.
+    """
     mm, last, last_mm, cand = 0, 0, 0, False
+    skip = leading_ns(adapter)
     for k, a in enumerate(adapter):
+        if k < skip:
+            continue
         b = window[k].upper() if k < len(window) else "N"
         if b in "ACGT" and b in IUPAC[a]:
-            last, last_mm = k + 1, mm
+            last, last_mm = k + 1 - skip, mm
             if last >= min_match[mm]:
                 cand = True
         else:
@@ -38,10 +48,13 @@ def reference_length(window, adapter, min_match):
 def reference_prefixes(window, adapter):
     """[(length, mismatches)] for every adapter prefix that ends on a match."""
     out, mm = [], 0
+    skip = leading_ns(adapter)
     for k, a in enumerate(adapter):
+        if k < skip:
+            continue
         b = window[k].upper() if k < len(window) else "N"
         if b in "ACGT" and b in IUPAC[a]:
-            out.append((k + 1, mm))
+            out.append((k + 1 - skip, mm))
         else:
             mm += 1
     return out
@@ -92,7 +105,10 @@ def adapter_rich_genome(tmp_path, size=6000, seed=0, name="chr1"):
     return fasta, seq
 
 
-@pytest.mark.parametrize("adapter,min_match", [(ADAPTER, (3, 5)), (ADAPTER, (4,)), ("TGGNATTC", (3, 4, 7))])
+@pytest.mark.parametrize(
+    "adapter,min_match",
+    [(ADAPTER, (3, 5)), (ADAPTER, (4,)), ("TGGNATTC", (3, 4, 7)), ("NNNNNN" + ADAPTER, (3, 5)), ("NNTGGNATTC", (3, 4, 7))],
+)
 def test_provider_matches_brute_force(tmp_path, adapter, min_match):
     fasta, seq = adapter_rich_genome(tmp_path)
     # Overlapping tiers: exact matches of 4+ beat the any-mismatch 6+ tier,
@@ -137,6 +153,44 @@ def test_exact_tier_ignores_a_longer_match_with_a_mismatch(tmp_path):
     assert [d["+"].tolist() for d in p.starts_for_chrom("chr1")] == [[], [], [30], []]
     p = AdapterSiteProvider(fasta, tiers=((4, 0, 7.0), (5, None, 9.0)))
     assert [d["+"].tolist() for d in p.starts_for_chrom("chr1")] == [[], [30], []]
+
+
+def test_leading_ns_are_skipped(tmp_path):
+    # A UMI adapter finds the same look-alikes as its fixed part, with the
+    # window (and so the artifact base) extended over the Ns, which lie 5' of
+    # the look-alike in RNA sense: plus starts move back by the UMI length;
+    # on minus the Ns extend the window rightward, so starts stay put.
+    fasta, seq = adapter_rich_genome(tmp_path, size=20_000)
+    umi = AdapterSiteProvider(fasta, "NNNNNN" + ADAPTER)
+    plain = AdapterSiteProvider(fasta, ADAPTER)
+    assert umi.skip == 6 and plain.skip == 0
+    got, want = umi.starts_for_chrom("chr1"), plain.starts_for_chrom("chr1")
+    n = len(seq)
+    for g, w in zip(got, want):
+        assert len(w["+"]) and len(w["-"])
+        # Only windows that still fit in the chromosome with the UMI added.
+        assert g["+"].tolist() == [s - 6 for s in w["+"].tolist() if s >= 6]
+        assert g["-"].tolist() == [s for s in w["-"].tolist() if s + 18 <= n]
+    # Without the skip every position would be a candidate (N matches anything).
+    assert sum(len(d["+"]) for d in got) < n // 10
+
+
+def test_leading_ns_count_toward_window_not_length():
+    from kackle.adapter import adapter_masks, sequence_masks
+    from kackle.computation import adapter_match_lengths
+
+    window = sequence_masks("ACGTTGGACTTC")
+    mm = np.array([3, 5], dtype=np.int64)
+    assert adapter_match_lengths(window, adapter_masks("NNNNTGGAATTC"), mm, 4)[0].tolist() == [4, 8]
+    # Without the skip the Ns count: an 8-base exact match.
+    assert adapter_match_lengths(window, adapter_masks("NNNNTGGAATTC"), mm)[0].tolist() == [8, 12]
+
+
+@pytest.mark.parametrize("adapter,min_match", [("NNNN", (1,)), ("NNNNTGG", (4,))])
+def test_leading_ns_validation(tmp_path, adapter, min_match):
+    fasta, _ = adapter_rich_genome(tmp_path)
+    with pytest.raises(ValueError):
+        AdapterSiteProvider(fasta, adapter, min_match=min_match)
 
 
 def resolved_sites(provider, chrom, run_min_reads):

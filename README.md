@@ -106,8 +106,11 @@ kackle -i plus.bw -I minus.bw -f genome.fa -o out.plus.bw -O out.minus.bw -c chr
 - A position is a candidate when the RNA-sense sequence that follows matches
   the adapter's 5' end for at least 3 bases with no mismatches, or 5 with one
   (`--adapter-min-match 3,5`). The adapter may use IUPAC codes. Leading
-  `N`s (such as a UMI at the start of the adapter) aren't handled yet: they
-  match every base, so nearly every position would become a candidate.
+  `N`s (a UMI at the start of the adapter, such as `NNNNNNTGGAATTCTCGG`) are
+  part of the look-alike, so the artifact base is the base before them, but
+  they aren't compared and don't count toward match lengths (in
+  `--adapter-min-match` or `--adapter-tiers`). If your reads keep the UMI
+  instead, pass the adapter without the `N`s.
 - Stronger look-alikes are flagged at lower fold thresholds
   (`--adapter-tiers`, `LEN[/MAXMM][:FOLD[:MINREADS]]`, default
   `3/0,4/0:7,8:5,10:3`): exact matches of 3 bases (bare TGG) at `-r`, of 4 or
