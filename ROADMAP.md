@@ -34,7 +34,7 @@ the average below the flank. It also doesn't make the TGGAA:1 pass
 unnecessary: with the TGG pass alone, TGGAA:1 sites stay at 1.5–2.0× their
 flanks either way. So the contamination is real but small, and fixing it
 this way costs more than it gains. Revisit only together with the
-low-count issue below.
+low-count issue below, which is likewise handled only in `--adapter` mode.
 
 `--adapter` uses a version of the same deterministic re-screen (leave
 stage-1-flagged artifact bases out of the background), and there it barely
@@ -42,81 +42,42 @@ moved the result: TGG 0.90–1.03 against 0.91–1.05 for two-pass base mode.
 So the contamination is handled in adapter mode, with base-only replacement
 and adapter-defined sites; motif passes still screen once.
 
-### Single reads on an empty background count as artifacts
+### Single reads on an empty background (handled only in `--adapter` mode)
 
 A site is flagged when its artifact base exceeds `threshold` times the
 neighborhood mean, so with no other reads within ±`source`, one read is
 enough (1 > 10 × 0). On the 6 samples, 36–41% of flagged TGG sites have a
-single read at the artifact base, and about 70% have a background of 0.
-In base mode such a site's replacement is a Poisson draw with mean 0, so
-the read is always removed. Given the ~11–18× enrichment at artifact bases,
-most such reads are probably artifacts, so removing them is likely right on
-average. But it is what made re-screening over-correct. Any change to the screen (a minimum
-read count, or a pseudocount in the background) should be judged by the
-same per-motif metaplots on real samples, not by flag counts.
+single read at the artifact base, and in base mode such a read is always
+removed.
 
-`--min-reads N` (default 1, a no-op) is in place to test the minimum-count
-option. How many lone-read flags are artifacts depends on the match class.
-On an empty background (raw input, 6 samples, whole genome), the rate of
-1-read artifact bases relative to AGG/CGG/GGG controls, and the implied
-artifact share (1 − 1/enrichment), are:
+How many of those reads are artifacts depends on the adapter match class.
+Against all positions on an empty background, about 70% of lone reads are
+artifacts at bare TGG, 91% at TGGA, 95% at TGGAA, but only 23–26% at
+5–7-base matches with a mismatch inside TGG (`kackle_realdata/results/lowcount`;
+AGG/CGG/GGG controls understate these shares, since they are one-mismatch
+TGG look-alikes themselves). So a global minimum is wrong, and a class-aware
+one fits.
 
-| class | 1 read | artifact share, 1 read | artifact share, 2 reads | 1-read, empty-bg share of flags |
-|---|---|---|---|---|
-| bare TGG (exact 3) | 2.2× | 49–62% | 57–71% | 38–43% |
-| TGGA (exact 4) | 7.2× | 84–88% | 89–93% | 32–39% |
-| TGGAA (exact 5) | 12.5× | 91–93% | 95–97% | 22–27% |
-| exact 6–12 | 15–18× | 92–95% | 96–98% | 16–20% |
-| 1 mismatch inside TGG, ≥ 5 bases | 0.88× | about 0 | about 0 | 41–46% |
+Since #16, `--adapter` requires 2 reads at sites that qualify for no tier
+(`--adapter-base-min-reads`, default 2), which with the default tiers are
+the short 1-mismatch matches; bare TGG has its own `3/0` tier at `-r` and
+keeps a minimum of 1. On the 6 samples (artifact base / flank,
+`results/lowcount_validate2`):
 
-(`kackle_realdata/scripts/lowcount_check.py`, `results/lowcount/summary.txt`.)
-So a global `--min-reads 2` would keep mostly-artifact reads at TGGA+ sites,
-while removing every lone read, as base mode does now, over-corrects at bare
-TGG and removes only natural reads at broken-TGG sites (the TGGAA:1 variants
-without TGG), which may be part of why corrected TGGAA:1 sites sit below their
-flanks. A class-aware rule fits better: a per-tier minimum in `--adapter`
-mode, or a minimum only for mismatch classes.
+| class | 0.3.0 | now |
+|---|---|---|
+| exact TGG | 0.73–0.84 | 0.73–0.84 |
+| exact TGGA | 1.08–1.28 | 0.97–1.15 |
+| exact TGGAA | 1.26–1.35 | 1.19–1.25 |
+| 1 mismatch in TGG, 5–7 bases | 0.45–0.50 | 0.80–0.90 |
 
-Tried in `--adapter` mode with per-tier minimums (`LEN[/MAXMM]:FOLD[:MINREADS]`)
-on the 6 samples, after fixing tier assignment (exact TGGA·T… sites used to
-miss `4/0` and fall to the base tier). Artifact base / flank by class:
+(TGGA/TGGAA moved because of the tier-assignment fix in the same PR.) Also
+tried and rejected: a 2-read minimum at bare TGG too (leaves its artifact
+in: 1.26–1.63), and dropping the short 1-mismatch class as candidates
+(`--adapter-min-match 3,8`: 1.59–1.91, above every exact class).
 
-| class | input | 0.3.0 | fixed tiers | 2 reads for no-tier sites | also bare TGG |
-|---|---|---|---|---|---|
-| exact TGG | 2.83–3.88 | 0.73–0.84 | 0.73–0.84 | 0.73–0.84 | 1.26–1.63 |
-| exact TGGA | 11.5–17.8 | 1.08–1.28 | 0.97–1.15 | 0.97–1.15 | 0.96–1.13 |
-| exact TGGAA | 60.5–91.6 | 1.26–1.35 | 1.19–1.25 | 1.19–1.25 | 1.17–1.23 |
-| exact 6+ | 206–835 | 0.86–1.15 | 0.81–1.14 | 0.81–1.13 | 0.81–1.12 |
-| 1 mismatch in TGG, 5–7 bases | 1.14–1.19 | 0.45–0.50 | 0.45–0.50 | 0.80–0.90 | 0.79–0.89 |
-| 1 mismatch in TGG, 8+ | 10.8–15.8 | 0.34–0.44 | 0.34–0.44 | 0.33–0.44 | 0.34–0.43 |
-| signal removed | | 22.4–35.3% | +0.03 points | −0.26 points | −1.0 points |
-
-(`--min-reads 2 --adapter-tiers 3/0:10:1,4/0:7:1,8:5:1,10:3:1` for the
-fourth column; without the `3/0:10:1` tier for the fifth;
-`kackle_realdata/results/lowcount_validate2`.) Requiring 2 reads at no-tier
-sites changes only the short 1-mismatch class, which stops being
-over-corrected, and nothing else. Doing the same at bare TGG leaves its
-artifact in (TGG-only sites sit naturally near 0.78). The short 1-mismatch
-class is still below its input level.
-
-Dropping that class as candidates instead (`--adapter-min-match 3,8`, default
-tiers; `results/lowcount_validate3`) goes too far: it leaves the class at
-1.59–1.91 of its (corrected) flank, above every corrected exact class, and
-removes about 1 point less signal (as much as the bare-TGG minimum). Other
-classes are unchanged. The input ratio (1.14–1.19) understates the class
-because the input's flanks still hold other sites' spikes.
-
-**The AGG/CGG/GGG control is not artifact-free.** They are one-mismatch TGG
-look-alikes, and on an empty background they have 1.4–1.5× the lone-read
-rate of all positions. Against all positions instead, the artifact share of
-lone reads is about 70% at bare TGG, 91% at TGGA, 95% at TGGAA, and 23–26%
-(1 and 2 reads) at short 1-mismatch sites, so the shares in the table above
-are lower bounds. The short 1-mismatch class carries a weak artifact: a
-2-read minimum there is a middle ground between removing every flagged read
-(0.45–0.50) and none (1.59–1.91). It is now the `--adapter` default
-(`--adapter-base-min-reads 2`, with a `3/0` tier for bare TGG). Motif passes
-(`-k`/`-b`) still flag single reads; `--min-reads` is there if a minimum is
-wanted.
+Motif passes (`-k`/`-b`) still flag single reads; `--min-reads N` (default
+1) is there if a minimum is wanted.
 
 ### `--resample window`: resampled total isn't density-preserving when `source != 2 * target`
 
@@ -161,7 +122,8 @@ Experimental since 0.3.0 (#14); usage in the README.
 - A position is a candidate when the RNA-sense sequence that follows matches
   the adapter's 5' end: at least 3 bases with no mismatches, or 5 with one.
 - Tiers lower the fold threshold for stronger matches, by match length and
-  optionally mismatch count (`LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`).
+  optionally mismatch count, with an optional minimum read count
+  (`LEN[/MAXMM][:FOLD[:MINREADS]]`, default `3/0,4/0:7,8:5,10:3`).
 - One pass, in two stages: a plain screen, then a rescreen whose background
   also leaves out the artifact bases flagged in the first stage. A first
   version left every candidate's artifact base out of the background; that
@@ -170,7 +132,7 @@ Experimental since 0.3.0 (#14); usage in the README.
 
 On the 6 samples, ratio = artifact base / mean at 20–50 bp from the motif:
 
-| | two-pass base (TGG:0 → TGGAA:1) | two-stage, `8:5,10:3` | two-stage, default `4/0:7,8:5,10:3` |
+| | two-pass base (TGG:0 → TGGAA:1) | two-stage, `8:5,10:3` | two-stage, 0.3.0 default `4/0:7,8:5,10:3` |
 |---|---|---|---|
 | TGG metaplot | 0.91–1.05 | 0.90–1.03 | 0.83–0.94 |
 | TGGAA metaplot | 0.80–0.89 | 0.81–0.90 | 0.72–0.81 |
