@@ -25,7 +25,16 @@ def test_only_flagged_artifact_bases_change(strand):
     out = correct_artifact_bases(signal, starts, 10, 10, strand)
     changed = np.flatnonzero(out != signal)
     assert set(changed) <= set(art[flagged])
-    assert out[art[flagged]].max() < 50  # spikes replaced by local-level draws
+    # Spikes replaced by local-level draws. Each site's mean leaves out every
+    # flagged artifact base; an unflagged neighbor spike can still raise it to
+    # ~28, so bound each draw by its own mean (the draws aren't seeded).
+    excluded = np.zeros(signal.size, bool)
+    excluded[art[flagged]] = True
+    means = np.array([
+        signal[s - 10 : s + 10][~excluded[s - 10 : s + 10]].mean() for s in starts[flagged]
+    ])
+    assert means.max() < 50
+    assert np.all(out[art[flagged]] < means + 10 * np.sqrt(means) + 10)
     keep = np.ones(signal.size, bool)
     keep[art[flagged]] = False
     assert np.array_equal(out[keep], signal[keep])
