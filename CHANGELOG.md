@@ -7,6 +7,40 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
 
 ## [Unreleased]
 
+### Added
+
+- `--min-reads N` (`min_reads=` in `correct_bigwigs` and `kmer_resample`):
+  a site is flagged only if its artifact base also has at least `N` reads.
+  The default, 1, leaves output unchanged. With an empty neighborhood a
+  single read passes any fold threshold; `--min-reads 2` keeps those reads.
+- `--adapter-tiers LEN[/MAXMM]:FOLD[:MINREADS]`: a tier can set its own
+  minimum artifact-base count. Tiers without one, and sites that qualify for
+  no tier, use `--min-reads`. `AdapterSiteProvider` tiers become 4-tuples
+  (3-tuples are still accepted) and gain `pass_min_reads`.
+
+### Changed
+
+- **`--adapter` needs 2 reads at sites that qualify for no tier**
+  (`--adapter-base-min-reads`, default 2; `base_min_reads=` in
+  `AdapterSiteProvider`). With the default tiers these are 5–7-base matches
+  with a mismatch inside TGG, whose single reads are mostly natural signal.
+  Bare exact TGG gets its own tier, `3/0`, at `-r`, so it keeps a minimum of
+  1; the default tiers are now `3/0,4/0:7,8:5,10:3`. A tier's FOLD may be
+  left out to use `-r`. On 6 PRO-seq samples this raised the corrected
+  1-mismatch 5–7-base class from 0.45–0.50 to 0.80–0.90 of its flank, left
+  every other class unchanged, and removed about 0.26 points less signal.
+
+### Fixed
+
+- `--adapter` tiers with a mismatch limit (such as the default `4/0:7`)
+  missed sites whose exact prefix was followed by a mismatch and more
+  matching bases: TGGA·T… counted as a 6-base match with one mismatch, failed
+  `4/0` and fell to the base threshold. About a quarter of exact TGGA/TGGAA
+  sites were affected. A site now qualifies when any prefix of at least the
+  tier's length has at most its mismatches. `adapter_match_lengths` returns
+  the longest match for each mismatch budget. This changes default
+  `--adapter` output.
+
 ## [0.3.0] - 2026-11-18
 
 Output differs from 0.2.0: base-only resampling is now the default, and

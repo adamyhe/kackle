@@ -16,6 +16,7 @@ def artifact_mask_serial(
     source: np.uint = 10,
     threshold: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Return a boolean mask of candidate starts that exceed local background.
 
@@ -33,7 +34,10 @@ def artifact_mask_serial(
         for j in range(start - source, start + source):
             neighborhood_sum += chromosome_signal_vector[j]
         suspicious_background = (neighborhood_sum - suspicious_signal) / (source * 2 - 1)
-        if suspicious_signal > threshold * suspicious_background:
+        if (
+            suspicious_signal >= min_reads
+            and suspicious_signal > threshold * suspicious_background
+        ):
             pass_threshold[i] = True
     return pass_threshold
 
@@ -45,6 +49,7 @@ def artifact_mask_parallel(
     source: np.uint = 10,
     threshold: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Parallel artifact-threshold screen used by ``correct_kmers``."""
     pass_threshold = np.full(starts.shape[0], False)
@@ -58,7 +63,10 @@ def artifact_mask_parallel(
         for j in range(start - source, start + source):
             neighborhood_sum += chromosome_signal_vector[j]
         suspicious_background = (neighborhood_sum - suspicious_signal) / (source * 2 - 1)
-        if suspicious_signal > threshold * suspicious_background:
+        if (
+            suspicious_signal >= min_reads
+            and suspicious_signal > threshold * suspicious_background
+        ):
             pass_threshold[i] = True
     return pass_threshold
 
@@ -148,6 +156,7 @@ def correct_kmers(
     target: np.uint = 5,
     threshold: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Correct suspicious kmer-centered signal spikes in a dense vector.
 
@@ -174,7 +183,7 @@ def correct_kmers(
         return out_vec
 
     flagged = artifact_mask_parallel(
-        chromosome_signal_vector, starts, source, threshold, strand
+        chromosome_signal_vector, starts, source, threshold, strand, min_reads
     )
     flagged_starts = np.sort(starts[flagged].astype(np.int64))
     if flagged_starts.shape[0] == 0:
@@ -208,6 +217,7 @@ def correct_artifact_bases(
     source: np.uint = 10,
     threshold: np.uint = 10,
     strand: str = "+",
+    min_reads: np.int64 = 1,
 ) -> np.array:
     """Redraw only the artifact base of each flagged site.
 
@@ -224,7 +234,7 @@ def correct_artifact_bases(
     if starts.shape[0] == 0:
         return out_vec
     flagged = artifact_mask_parallel(
-        chromosome_signal_vector, starts, source, threshold, strand
+        chromosome_signal_vector, starts, source, threshold, strand, min_reads
     )
     offset = 1 if strand == "+" else 0
     art = np.sort(starts[flagged].astype(np.int64)) - offset
@@ -258,6 +268,7 @@ def correct_adapter_sites(
     thresholds: np.array,
     source: np.uint = 10,
     strand: str = "+",
+    min_reads=None,
 ) -> np.array:
     """Screen and correct all adapter look-alike sites of one strand in one pass.
 
@@ -276,7 +287,9 @@ def correct_adapter_sites(
     Poisson draw with the stage-2 mean. Every other base keeps its input value.
     Each site writes only its own artifact base and reads only the input, so
     the result does not depend on site order and the loops have no races.
-    ``starts`` must not repeat an anchor.
+    ``starts`` must not repeat an anchor. ``min_reads``, if given, is a
+    per-site int64 array: in both stages a site is flagged only if its
+    artifact base also has at least ``min_reads[i]`` reads.
     """
     out_vec = chromosome_signal_vector.copy()
     n = starts.shape[0]
@@ -297,7 +310,11 @@ def correct_adapter_sites(
         for j in range(lo, hi):
             total += chromosome_signal_vector[j]
         mean = (total - chromosome_signal_vector[idx]) / (hi - lo - 1)
-        if chromosome_signal_vector[idx] > thresholds[i] * mean:
+        need = 1 if min_reads is None else min_reads[i]
+        if (
+            chromosome_signal_vector[idx] >= need
+            and chromosome_signal_vector[idx] > thresholds[i] * mean
+        ):
             flag1[i] = True
     art = np.sort(starts[flag1].astype(np.int64)) - offset
     m = art.shape[0]
@@ -322,24 +339,29 @@ def correct_adapter_sites(
         if count == 0:
             continue
         mean = total / count
-        if flag1[i] or chromosome_signal_vector[idx] > thresholds[i] * mean:
+        need = 1 if min_reads is None else min_reads[i]
+        if flag1[i] or (
+            chromosome_signal_vector[idx] >= need
+            and chromosome_signal_vector[idx] > thresholds[i] * mean
+        ):
             out_vec[idx] = np.random.poisson(mean)
     return out_vec
 
 
 @njit(parallel=True, cache=True)
 def adapter_match_lengths(sequence, adapter, min_match):
-    """Adapter look-alike match length and mismatches at every window start.
+    """Adapter look-alike match lengths, by mismatch budget, at every window start.
 
     ``sequence`` and ``adapter`` are IUPAC bitmasks (A=1, C=2, G=4, T=8; 0 for
     anything that is not A/C/G/T in the sequence), so a base matches when the
     masks share a bit. ``min_match[m]`` is the shortest prefix of the adapter
     that makes a candidate when it contains ``m`` mismatches; its length minus
-    one is the most mismatches allowed. Returns two int8 arrays over window
-    starts ``p`` in ``[0, len(sequence) - len(adapter)]``: the length of the
-    longest adapter prefix matched with at most that many mismatches (ending
-    on a match), and the number of mismatches inside that prefix. Both are 0
-    when the window is not a candidate.
+    one is the most mismatches allowed. Returns an int8 array of shape
+    ``(n_windows, len(min_match))`` over window starts ``p`` in
+    ``[0, len(sequence) - len(adapter)]``: entry ``[p, m]`` is the length of
+    the longest adapter prefix (ending on a match) with at most ``m``
+    mismatches, so column 0 is the exact-match length. A row is all 0 when the
+    window is not a candidate.
     """
     n = sequence.shape[0]
     k_len = adapter.shape[0]
@@ -347,27 +369,26 @@ def adapter_match_lengths(sequence, adapter, min_match):
     n_windows = n - k_len + 1
     if n_windows < 0:
         n_windows = 0
-    lengths = np.zeros(n_windows, dtype=np.int8)
-    mismatches = np.zeros(n_windows, dtype=np.int8)
+    lengths = np.zeros((n_windows, max_mm + 1), dtype=np.int8)
     for p in prange(n_windows):
         mm = 0
-        last = 0
-        last_mm = 0
         candidate = False
         for k in range(k_len):
             if sequence[p + k] & adapter[k]:
-                last = k + 1
-                last_mm = mm
-                if last >= min_match[mm]:
+                # Longest prefix ending on a match with exactly ``mm`` so far;
+                # fill every budget >= mm (later matches are longer).
+                for m in range(mm, max_mm + 1):
+                    lengths[p, m] = k + 1
+                if k + 1 >= min_match[mm]:
                     candidate = True
             else:
                 mm += 1
                 if mm > max_mm:
                     break
-        if candidate:
-            lengths[p] = last
-            mismatches[p] = last_mm
-    return lengths, mismatches
+        if not candidate:
+            for m in range(max_mm + 1):
+                lengths[p, m] = 0
+    return lengths
 
 
 # ---------------------------------------------------------------------------

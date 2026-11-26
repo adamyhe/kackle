@@ -34,7 +34,7 @@ the average below the flank. It also doesn't make the TGGAA:1 pass
 unnecessary: with the TGG pass alone, TGGAA:1 sites stay at 1.5–2.0× their
 flanks either way. So the contamination is real but small, and fixing it
 this way costs more than it gains. Revisit only together with the
-low-count issue below.
+low-count issue below, which is likewise handled only in `--adapter` mode.
 
 `--adapter` uses a version of the same deterministic re-screen (leave
 stage-1-flagged artifact bases out of the background), and there it barely
@@ -42,59 +42,54 @@ moved the result: TGG 0.90–1.03 against 0.91–1.05 for two-pass base mode.
 So the contamination is handled in adapter mode, with base-only replacement
 and adapter-defined sites; motif passes still screen once.
 
-### Single reads on an empty background count as artifacts
+### Single reads on an empty background (handled only in `--adapter` mode)
 
 A site is flagged when its artifact base exceeds `threshold` times the
 neighborhood mean, so with no other reads within ±`source`, one read is
 enough (1 > 10 × 0). On the 6 samples, 36–41% of flagged TGG sites have a
-single read at the artifact base, and about 70% have a background of 0.
-Given the ~11–18× enrichment at artifact bases, most such reads are
-probably artifacts, so removing them is likely right on average. But it is
-what made re-screening over-correct. Any change to the screen (a minimum
-read count, or a pseudocount in the background) should be judged by the
-same per-motif metaplots on real samples, not by flag counts.
+single read at the artifact base, and in base mode such a read is always
+removed.
 
-### Window resampling flattens natural structure (default changed in 0.3.0)
+How many of those reads are artifacts depends on the adapter match class.
+Against all positions on an empty background, about 70% of lone reads are
+artifacts at bare TGG, 91% at TGGA, 95% at TGGAA, but only 23–26% at
+5–7-base matches with a mismatch inside TGG (`kackle_realdata/results/lowcount`;
+AGG/CGG/GGG controls understate these shares, since they are one-mismatch
+TGG look-alikes themselves). So a global minimum is wrong, and a class-aware
+one fits.
 
-The whole `[anchor - target, anchor + target)` window of a flagged site is
-redrawn from its flanks, not only the artifact base, so natural dips inside
-the window are filled in. The clearest case is the low signal at the motif's
-own G bases: at TGG offset +1 on the plus strand, the input sits at 0.13 of
-the 20–50 bp flank and window mode raises it to 0.33.
+Since #16, `--adapter` requires 2 reads at sites that qualify for no tier
+(`--adapter-base-min-reads`, default 2), which with the default tiers are
+the short 1-mismatch matches; bare TGG has its own `3/0` tier at `-r` and
+keeps a minimum of 1. On the 6 samples (artifact base / flank,
+`results/lowcount_validate2`):
 
-These dips are real, not a side effect of the artifact. In raw input
-(PROseq_2 and PROseq_7), AGG, CGG and GGG show the same low signal at their G
-bases (0.2–0.6 of the flank) without a spike at the base before the motif
-(0.8–1.4× the flank, against 11–17× at TGG). Their remaining spikes come from
-overlapping sequence: GGG preceded by T is a TGG site (2–3× at −2), and AAA
-after TGG makes TGGAA (about 2× at −4). CGG also has an unexplained 3× peak
-on its C, which is not a TGG overlap.
+| class | 0.3.0 | now |
+|---|---|---|
+| exact TGG | 0.73–0.84 | 0.73–0.84 |
+| exact TGGA | 1.08–1.28 | 0.97–1.15 |
+| exact TGGAA | 1.26–1.35 | 1.19–1.25 |
+| 1 mismatch in TGG, 5–7 bases | 0.45–0.50 | 0.80–0.90 |
 
-Not every difference from the input is flattening. The input's dip at TGG
-offsets −5 to −2 on the plus strand (about 0.75) rises to about 1.0 in
-every mode, including base-only resampling, which only lowers flagged
-artifact bases. The rise comes from the normalization: the input's flank
-still holds other TGG sites' spikes, which correction removes.
+(TGGA/TGGAA moved because of the tier-assignment fix in the same PR.) Also
+tried and rejected: a 2-read minimum at bare TGG too (leaves its artifact
+in: 1.26–1.63), and dropping the short 1-mismatch class as candidates
+(`--adapter-min-match 3,8`: 1.59–1.91, above every exact class).
 
-Base-only resampling (`--resample base`, #14), the default since 0.3.0,
-redraws just the artifact base with a Poisson draw from its neighborhood
-mean. On the 6 samples it changed nothing outside artifact bases and kept
-the motif dip (TGG offset +1: input
-0.13, window mode 0.33, base only 0.18 of the flank). The artifact-base ratio
-stayed close to window mode (TGG 0.91–1.05 vs 0.92–1.06; TGGAA:1 0.80–0.89 vs
-0.82–0.92). It removed about 1% more of the total signal, mostly reads that
-window mode adds back into the dip.
+Motif passes (`-k`/`-b`) still flag single reads; `--min-reads N` (default
+1) is there if a minimum is wanted.
 
-### Resampled total isn't density-preserving when `source - target != target`
+### `--resample window`: resampled total isn't density-preserving when `source != 2 * target`
 
 Each flagged span is redrawn with a total equal to its flank sum, scaled by
 `span_width / (2 * target)`. Isolated sites have `2 * (source - target)` flank
 bases and `2 * target` target bases, so the per-base level is only preserved
 when `source = 2 * target`, as with the defaults (10 and 5). With `-s 20 -t 5`,
-for example, a corrected window gets three times the local density. Since
-0.3.0 this only affects `--resample window`; base mode doesn't use `target`. Scaling by
-`span_width / flank_width` instead would fix this, but it would change output
-for every non-default `source`/`target` setting.
+for example, a corrected window gets three times the local density. Base
+mode, the default since 0.3.0, doesn't use `target`, so this only matters for
+`--resample window`. Scaling by `span_width / flank_width` instead would fix
+it, but would change window-mode output for every non-default
+`source`/`target` setting.
 
 ## Experimental: `--adapter` mode
 
@@ -118,15 +113,17 @@ T followed by 7 more adapter bases gives 40×. Of the 16 TGGAA:1 variants, four
 most of what remains is below the 10× threshold: TGGA–TGGAATT sites sit at
 1.6–2.4× their flanks with only about 0.15% flagged.
 
-Corrected TGGAA:1 sites sit below their flanks (0.80–0.92) because 57% of them have no TGG at the anchor (the mismatch is in the first
-three bases), and those already sit at 0.30–0.37 of the flank in the input.
+Corrected TGGAA:1 sites sit below their flanks (0.80–0.92) because 57% of
+them have no TGG at the anchor (the mismatch is in the first three bases),
+and those already sit at 0.30–0.37 of the flank in the input.
 
-Shipped as experimental in #14; usage in the README.
+Experimental since 0.3.0 (#14); usage in the README.
 
 - A position is a candidate when the RNA-sense sequence that follows matches
   the adapter's 5' end: at least 3 bases with no mismatches, or 5 with one.
 - Tiers lower the fold threshold for stronger matches, by match length and
-  optionally mismatch count (`LEN[/MAXMM]:FOLD`, default `4/0:7,8:5,10:3`).
+  optionally mismatch count, with an optional minimum read count
+  (`LEN[/MAXMM][:FOLD[:MINREADS]]`, default `3/0,4/0:7,8:5,10:3`).
 - One pass, in two stages: a plain screen, then a rescreen whose background
   also leaves out the artifact bases flagged in the first stage. A first
   version left every candidate's artifact base out of the background; that
@@ -135,7 +132,7 @@ Shipped as experimental in #14; usage in the README.
 
 On the 6 samples, ratio = artifact base / mean at 20–50 bp from the motif:
 
-| | two-pass base (TGG:0 → TGGAA:1) | two-stage, `8:5,10:3` | two-stage, default `4/0:7,8:5,10:3` |
+| | two-pass base (TGG:0 → TGGAA:1) | two-stage, `8:5,10:3` | two-stage, 0.3.0 default `4/0:7,8:5,10:3` |
 |---|---|---|---|
 | TGG metaplot | 0.91–1.05 | 0.90–1.03 | 0.83–0.94 |
 | TGGAA metaplot | 0.80–0.89 | 0.81–0.90 | 0.72–0.81 |
@@ -182,16 +179,12 @@ Open:
 
 ## Performance
 
-Profiled on a synthetic 100 Mb genome in FASTA mode (2 chromosomes, serial):
-25.4 s total, of which motif location was 17.5 s (69%). The correction kernel
-itself was negligible.
-
-Done (details and numbers in the CHANGELOG for 0.3.0): start arrays and a
-numba motif matcher; one pass over both strands with streamed output; large
-chromosomes split across workers (`--chunk-size`). On hg38 (PROseq_2),
-`kackle` now takes 17–30 s at `-w 4` to `-w 16` with about 0.8 GB per
-process, and levels off around 17–20 s, which is likely fixed costs:
-spawning workers, cut planning in the parent, and writing.
+0.3.0 replaced the old bottleneck, motif location (69% of a serial run
+before), with a numba matcher, and added streamed both-strand output and
+`--chunk-size`; numbers are in the CHANGELOG. On hg38 (PROseq_2), `kackle`
+takes 17–30 s at `-w 4` to `-w 16` with about 0.8 GB per process, and levels
+off around 17–20 s, which is likely fixed costs: spawning workers, cut
+planning in the parent, and writing.
 
 Remaining, roughly in order of payoff:
 
@@ -218,6 +211,26 @@ Remaining, roughly in order of payoff:
 
 **Plot features** (not performance): overlay several "after" tracks in one
 figure, and show each motif spec separately instead of pooling them.
+
+## Evaluating changes
+
+Findings that any change to screening or resampling should be checked
+against (ratio = signal / mean at 20–50 bp from the motif):
+
+- **Judge by adapter match class, not the pooled metaplot** (see the
+  `--adapter` section): the TGG metaplot mixes sites that are naturally below
+  their flank with sites that still carry artifact.
+- **The dips at the motif's own G bases are real.** In raw input, AGG, CGG
+  and GGG show the same low signal at their G bases (0.2–0.6) with no spike
+  at the base before the motif (0.8–1.4×, against 11–17× at TGG). A
+  correction should keep them: at TGG offset +1 (plus strand) the input is
+  0.13, base mode 0.18, and window mode, which fills them in, 0.33.
+- **Not every rise is flattening.** The input's dip at TGG offsets −5 to −2
+  (about 0.75) rises to about 1.0 in every mode, including base mode,
+  because correction removes other TGG sites' spikes from the flank used for
+  normalization.
+- Control motifs still spike where they overlap TGG sites: GGG preceded by T
+  (2–3× at −2), and AAA after TGG, which makes TGGAA (about 2× at −4).
 
 ## Open questions
 
