@@ -349,7 +349,7 @@ def correct_adapter_sites(
 
 
 @njit(parallel=True, cache=True)
-def adapter_match_lengths(sequence, adapter, min_match):
+def adapter_match_lengths(sequence, adapter, min_match, skip=0):
     """Adapter look-alike match lengths, by mismatch budget, at every window start.
 
     ``sequence`` and ``adapter`` are IUPAC bitmasks (A=1, C=2, G=4, T=8; 0 for
@@ -362,6 +362,10 @@ def adapter_match_lengths(sequence, adapter, min_match):
     the longest adapter prefix (ending on a match) with at most ``m``
     mismatches, so column 0 is the exact-match length. A row is all 0 when the
     window is not a candidate.
+
+    The first ``skip`` adapter bases (leading ``N``s such as a UMI) are part
+    of the window but are not compared and don't count toward any length:
+    lengths and ``min_match`` are measured from adapter base ``skip``.
     """
     n = sequence.shape[0]
     k_len = adapter.shape[0]
@@ -373,13 +377,13 @@ def adapter_match_lengths(sequence, adapter, min_match):
     for p in prange(n_windows):
         mm = 0
         candidate = False
-        for k in range(k_len):
+        for k in range(skip, k_len):
             if sequence[p + k] & adapter[k]:
                 # Longest prefix ending on a match with exactly ``mm`` so far;
                 # fill every budget >= mm (later matches are longer).
                 for m in range(mm, max_mm + 1):
-                    lengths[p, m] = k + 1
-                if k + 1 >= min_match[mm]:
+                    lengths[p, m] = k + 1 - skip
+                if k + 1 - skip >= min_match[mm]:
                     candidate = True
             else:
                 mm += 1

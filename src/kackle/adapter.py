@@ -4,7 +4,10 @@ The artifact kackle corrects comes from primer mispriming on stretches of a
 real fragment that resemble the 3' adapter. The read then ends on the base
 just before the look-alike (the artifact base). A position is a candidate
 when the RNA-sense sequence starting there matches the adapter's 5' end for
-long enough (see :func:`kackle.computation.adapter_match_lengths`). The match
+long enough (see :func:`kackle.computation.adapter_match_lengths`). Leading
+``N``s (a UMI at the adapter's 5' end) are skipped: they stay part of the
+look-alike window, so the artifact base is still the base before it, but
+they are not compared and don't count toward match length. The match
 length, and optionally its number of mismatches, set the site's screening
 threshold, since a longer or cleaner match is a stronger artifact.
 
@@ -152,7 +155,9 @@ class AdapterSiteProvider:
     (``motif_specs`` holds one pseudo-spec per tier, each with the full
     adapter as its motif). A site's window is the ``len(adapter)`` bases of
     the look-alike, so a minus anchor is ``start + len(adapter)``, as for
-    motif specs. A site qualifies for a tier when some adapter prefix of at
+    motif specs. Leading ``N``s in the adapter are in the window but are
+    skipped by the matcher, so lengths (``min_match``, tier lengths) count
+    from the first fixed base. A site qualifies for a tier when some adapter prefix of at
     least the tier's length matches with at most its mismatches (so an exact
     TGGA followed by a mismatch still qualifies for ``4/0``), and goes to the qualifying
     tier with the lowest fold (the first one on a tie). Tier 0 holds sites
@@ -175,9 +180,13 @@ class AdapterSiteProvider:
     def __post_init__(self):
         self.adapter = self.adapter.upper()
         self._masks = adapter_masks(self.adapter)
+        #: Leading ``N``s (a UMI): in the window, but not compared or counted.
+        self.skip = len(self.adapter) - len(self.adapter.lstrip("N"))
+        if self.skip == len(self.adapter):
+            raise ValueError("adapter is all N; it needs fixed bases to match")
         self.min_match = tuple(int(v) for v in self.min_match)
-        if self.min_match[0] > len(self.adapter):
-            raise ValueError("min match length is longer than the adapter")
+        if self.min_match[0] > len(self.adapter) - self.skip:
+            raise ValueError("min match length is longer than the adapter (after leading Ns)")
         self.tiers = normalize_tiers(self.tiers)
         if self.base_min_reads is not None:
             if isinstance(self.base_min_reads, bool) or int(self.base_min_reads) != self.base_min_reads \
@@ -245,12 +254,12 @@ class AdapterSiteProvider:
         min_match = np.array(self.min_match, dtype=np.int64)
         by_strand = {}
         if "+" in wanted:
-            lengths = adapter_match_lengths(seq, self._masks, min_match)
+            lengths = adapter_match_lengths(seq, self._masks, min_match, self.skip)
             pos = np.flatnonzero(lengths[:, -1]).astype(np.int64)
             by_strand["+"] = self._split(pos + start, lengths[pos])
         if "-" in wanted and self.both_strands:
             rc = _COMPLEMENT[seq[::-1]]
-            lengths = adapter_match_lengths(rc, self._masks, min_match)
+            lengths = adapter_match_lengths(rc, self._masks, min_match, self.skip)
             q = np.flatnonzero(lengths[:, -1]).astype(np.int64)
             # Window q of the reverse complement covers genomic
             # [start + n_windows - 1 - q, ... + k); reverse to keep starts sorted.

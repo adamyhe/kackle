@@ -166,15 +166,15 @@ Open:
 - The artifact base sits just before the look-alike in RNA orientation,
   which holds for 3'-end tracks like these. Other library layouts would need
   an option for which side the adapter is on.
-- **Adapters with leading UMI `N`s.** `N` matches every base, so an adapter
-  such as `NNNNNNTGGAATTC…` would make nearly every position a candidate,
-  and the exact-match tier would hit almost everything. Leading `N`s need to
-  be skipped, or not count toward match length, before such adapters work.
+- **UMI adapters are untested on real data.** Leading `N`s are now skipped
+  (they don't count toward match length) and the artifact base is taken as
+  the base before the UMI, which assumes the UMI is trimmed from reads. That
+  geometry needs checking on a UMI library.
 - **Making `--adapter` the default.** It has been validated on one dataset
   (6 samples, one lab, the TruSeq small-RNA adapter), and its tiers were
   tuned on those samples. It needs a second dataset, ideally another
   protocol or adapter, where it beats `--resample base` with TGG → TGGAA:1 by
-  the per-class measures, plus the `N` fix above. It would also make the
+  the per-class measures (a UMI library would also check the `N` handling). It would also make the
   default depend on the input mode, since BED6 (`-b`) users can't use it.
 
 ## Performance
