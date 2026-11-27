@@ -4,7 +4,8 @@ The artifact kackle corrects comes from primer mispriming on stretches of a
 real fragment that resemble the 3' adapter. The read then ends on the base
 just before the look-alike (the artifact base). A position is a candidate
 when the RNA-sense sequence starting there matches the adapter's 5' end for
-long enough (see :func:`kackle.computation.adapter_match_lengths`). Leading
+long enough (see :func:`kackle.computation.adapter_match_lengths`; the
+pipeline runs the faster :func:`kackle.computation.adapter_candidates`). Leading
 ``N``s (a UMI at the adapter's 5' end) are skipped: they stay part of the
 look-alike window, so the artifact base is still the base before it, but
 they are not compared and don't count toward match length. The match
@@ -22,8 +23,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from kackle.computation import adapter_match_lengths
-from kackle.motifs import MotifSpec, open_fasta
+from kackle.computation import adapter_candidates, sequence_codes
+from kackle.motifs import MotifSpec, thread_fasta
 
 STRANDS = ("+", "-")
 
@@ -68,7 +69,8 @@ def adapter_masks(adapter):
 
 def sequence_masks(sequence):
     """Sequence string -> uint8 bitmasks (0 for anything but A/C/G/T, any case)."""
-    return _SEQ_MASK[np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)]
+    raw = np.frombuffer(sequence.encode("ascii", "replace"), dtype=np.uint8)
+    return sequence_codes(raw, _SEQ_MASK)
 
 
 def parse_min_match(text):
@@ -180,6 +182,7 @@ class AdapterSiteProvider:
     def __post_init__(self):
         self.adapter = self.adapter.upper()
         self._masks = adapter_masks(self.adapter)
+        self._rc_masks = _COMPLEMENT[self._masks]
         #: Leading ``N``s (a UMI): in the window, but not compared or counted.
         self.skip = len(self.adapter) - len(self.adapter.lstrip("N"))
         if self.skip == len(self.adapter):
@@ -193,7 +196,7 @@ class AdapterSiteProvider:
                     or self.base_min_reads < 1:
                 raise ValueError("base_min_reads must be an integer >= 1 or None")
             self.base_min_reads = int(self.base_min_reads)
-        open_fasta(self.fasta_fname).close()  # build the .fai in the parent
+        thread_fasta(self.fasta_fname)  # build the .fai in the parent
         spec = MotifSpec(self.adapter, len(self.min_match) - 1)
         self.motif_specs = [spec] * (1 + len(self.tiers))
 
@@ -237,34 +240,27 @@ class AdapterSiteProvider:
         """Sites whose window starts in ``[start, end)``, one dict per tier."""
         wanted = STRANDS if strands is None else tuple(strands)
         k = len(self.adapter)
-        fasta = open_fasta(self.fasta_fname)  # own handle: safe across threads
-        try:
-            if chrom not in fasta:
-                raise KeyError(f"Chromosome {chrom!r} not found in {self.fasta_fname}")
-            length = len(fasta[chrom])
-            start = max(0, int(start))
-            end = min(int(end), length - k + 1)
-            empty = np.empty(0, dtype=np.int64)
-            out = [{s: empty for s in STRANDS} for _ in self.motif_specs]
-            if end <= start:
-                return out
-            seq = sequence_masks(str(fasta[chrom][start : end + k - 1]))
-        finally:
-            fasta.close()
+        fasta = thread_fasta(self.fasta_fname)  # per-thread handle: safe across threads
+        if chrom not in fasta:
+            raise KeyError(f"Chromosome {chrom!r} not found in {self.fasta_fname}")
+        length = len(fasta[chrom])
+        start = max(0, int(start))
+        end = min(int(end), length - k + 1)
+        empty = np.empty(0, dtype=np.int64)
+        out = [{s: empty for s in STRANDS} for _ in self.motif_specs]
+        if end <= start:
+            return out
+        seq = sequence_masks(str(fasta[chrom][start : end + k - 1]))
         min_match = np.array(self.min_match, dtype=np.int64)
         by_strand = {}
         if "+" in wanted:
-            lengths = adapter_match_lengths(seq, self._masks, min_match, self.skip)
-            pos = np.flatnonzero(lengths[:, -1]).astype(np.int64)
-            by_strand["+"] = self._split(pos + start, lengths[pos])
+            pos, lengths = adapter_candidates(seq, self._masks, min_match, self.skip, False)
+            by_strand["+"] = self._split(pos + start, lengths)
         if "-" in wanted and self.both_strands:
-            rc = _COMPLEMENT[seq[::-1]]
-            lengths = adapter_match_lengths(rc, self._masks, min_match, self.skip)
-            q = np.flatnonzero(lengths[:, -1]).astype(np.int64)
-            # Window q of the reverse complement covers genomic
-            # [start + n_windows - 1 - q, ... + k); reverse to keep starts sorted.
-            genomic = start + (lengths.shape[0] - 1 - q)
-            by_strand["-"] = [a[::-1].copy() for a in self._split(genomic, lengths[q])]
+            # Matched on the reverse complement in place, with complemented
+            # adapter masks; starts are genomic window starts, already sorted.
+            pos, lengths = adapter_candidates(seq, self._rc_masks, min_match, self.skip, True)
+            by_strand["-"] = self._split(pos + start, lengths)
         for strand, arrays in by_strand.items():
             for tier, arr in enumerate(arrays):
                 out[tier][strand] = arr

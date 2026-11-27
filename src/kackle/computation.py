@@ -363,6 +363,8 @@ def adapter_match_lengths(sequence, adapter, min_match, skip=0):
     mismatches, so column 0 is the exact-match length. A row is all 0 when the
     window is not a candidate.
 
+    This is the plain reference; the pipeline uses :func:`adapter_candidates`.
+
     The first ``skip`` adapter bases (leading ``N``s such as a UMI) are part
     of the window but are not compared and don't count toward any length:
     lengths and ``min_match`` are measured from adapter base ``skip``.
@@ -395,77 +397,179 @@ def adapter_match_lengths(sequence, adapter, min_match, skip=0):
     return lengths
 
 
-# ---------------------------------------------------------------------------
-# Motif matching
-# ---------------------------------------------------------------------------
-
-_MOTIF_CHUNK = 1 << 16
+_ADAPTER_CHUNK = 1 << 16
 
 
 @njit(cache=True, inline="always")
-def _window_matches(sequence, start, pattern, max_mismatches):
-    """Whether ``sequence[start:start + k]`` is all A/C/G/T within Hamming distance.
+def _adapter_maybe(sequence, adapter, min_match, skip, reverse, lo, width, maybe, mm):
+    """Vectorized pre-check: ``maybe[i]`` is 0 where window ``lo + i`` can't be a candidate.
 
-    Bytes are uppercased with ``& 0xDF`` (ASCII letters only). A window with
-    any other base (N, IUPAC codes, gaps) never matches, which is what an
-    exact search over the A/C/G/T mismatch variants of ``pattern`` gives.
+    A candidate has, for some budget ``m``, a prefix of at least
+    ``min_match[m]`` bases with at most ``m`` mismatches, so its first
+    ``min_match[m]`` compared bases hold at most ``m`` mismatches.
     """
-    mismatches = 0
-    for j in range(pattern.shape[0]):
-        base = sequence[start + j] & 0xDF
-        if base != 65 and base != 67 and base != 71 and base != 84:  # A C G T
-            return False
-        if base != pattern[j]:
-            mismatches += 1
-            if mismatches > max_mismatches:
-                return False
-    return True
+    k_len = adapter.shape[0]
+    n_budgets = min_match.shape[0]
+    for i in range(width):
+        mm[i] = 0
+        maybe[i] = 0
+    depth = min(min_match[n_budgets - 1], k_len - skip)
+    for j in range(depth):
+        k = skip + j
+        a = adapter[k]
+        off = lo + (k_len - 1 - k if reverse else k)
+        column = sequence[off : off + width]
+        for i in range(width):
+            mm[i] += np.uint8((column[i] & a) == 0)
+        for b in range(n_budgets):
+            if min_match[b] == j + 1:
+                bb = np.uint8(b)
+                for i in range(width):
+                    maybe[i] |= np.uint8(mm[i] <= bb)
+
+
+@njit(cache=True, inline="always")
+def _adapter_scan(sequence, adapter, min_match, skip, reverse, p, lengths):
+    """The reference prefix scan for one window; fills ``lengths``, returns candidacy."""
+    k_len = adapter.shape[0]
+    max_mm = min_match.shape[0] - 1
+    for m in range(max_mm + 1):
+        lengths[m] = 0
+    mm = 0
+    candidate = False
+    for k in range(skip, k_len):
+        if reverse:
+            base = sequence[p + k_len - 1 - k]
+        else:
+            base = sequence[p + k]
+        if base & adapter[k]:
+            for m in range(mm, max_mm + 1):
+                lengths[m] = k + 1 - skip
+            if k + 1 - skip >= min_match[mm]:
+                candidate = True
+        else:
+            mm += 1
+            if mm > max_mm:
+                break
+    return candidate
 
 
 @njit(parallel=True, cache=True)
-def motif_window_starts(sequence, pattern, max_mismatches):
-    """Return sorted starts of windows that match ``pattern`` (see ``_window_matches``).
+def adapter_candidates(sequence, adapter, min_match, skip=0, reverse=False):
+    """Candidate windows and their match lengths: a fast ``adapter_match_lengths``.
 
-    ``kackle.motifs._python_window_starts`` is the independent reference this
-    is tested against, and the fallback when numba JIT is disabled.
+    Same arguments and rules as :func:`adapter_match_lengths` (which is the
+    reference this is tested against), but returns only the candidates, as
+    ``(starts, lengths)``: sorted int64 window starts and their int8
+    ``(n, len(min_match))`` lengths by mismatch budget.
 
-    Parameters
-    ----------
-    sequence : numpy.ndarray of uint8
-        ASCII sequence bytes, any case.
-    pattern : numpy.ndarray of uint8
-        Uppercase A/C/G/T motif bytes.
-    max_mismatches : int
-        Maximum substitutions allowed.
+    With ``reverse``, windows are matched on the reverse complement in place:
+    window ``p`` is ``sequence[p:p + len(adapter)]`` read backwards and
+    complemented, and ``adapter`` must then hold the *complemented* adapter
+    masks. ``p`` is the window's leftmost base either way, so minus-strand
+    starts come out sorted without reversing the sequence.
 
-    Two parallel passes over fixed-size chunks: count matches per chunk, then
-    fill each chunk's slice of the output, so starts come out sorted and
-    unique without a sort.
+    A vectorized pre-check (``_adapter_maybe``) rejects nearly every
+    non-candidate; only the rest get the per-window prefix scan. Two passes
+    over chunks (count, then fill at each chunk's offset) keep the output
+    compact without whole-sequence scratch arrays.
     """
-    k = pattern.shape[0]
-    n_windows = sequence.shape[0] - k + 1
-    if k == 0 or n_windows <= 0:
-        return np.empty(0, dtype=np.int64)
-    n_chunks = (n_windows + _MOTIF_CHUNK - 1) // _MOTIF_CHUNK
+    n = sequence.shape[0]
+    k_len = adapter.shape[0]
+    n_budgets = min_match.shape[0]
+    n_windows = n - k_len + 1
+    if n_windows < 0:
+        n_windows = 0
+    n_chunks = (n_windows + _ADAPTER_CHUNK - 1) // _ADAPTER_CHUNK
     counts = np.zeros(n_chunks, dtype=np.int64)
     for chunk in prange(n_chunks):
-        lo = chunk * _MOTIF_CHUNK
-        hi = min(lo + _MOTIF_CHUNK, n_windows)
+        lo = chunk * _ADAPTER_CHUNK
+        width = min(lo + _ADAPTER_CHUNK, n_windows) - lo
+        maybe = np.empty(width, dtype=np.uint8)
+        mm = np.empty(width, dtype=np.uint8)
+        scratch = np.empty(n_budgets, dtype=np.int8)
+        _adapter_maybe(sequence, adapter, min_match, skip, reverse, lo, width, maybe, mm)
         found = 0
-        for start in range(lo, hi):
-            if _window_matches(sequence, start, pattern, max_mismatches):
+        for i in range(width):
+            if maybe[i] and _adapter_scan(sequence, adapter, min_match, skip, reverse, lo + i, scratch):
                 found += 1
         counts[chunk] = found
     offsets = np.zeros(n_chunks + 1, dtype=np.int64)
     for chunk in range(n_chunks):
         offsets[chunk + 1] = offsets[chunk] + counts[chunk]
     starts = np.empty(offsets[n_chunks], dtype=np.int64)
+    lengths = np.empty((offsets[n_chunks], n_budgets), dtype=np.int8)
+    for chunk in prange(n_chunks):
+        lo = chunk * _ADAPTER_CHUNK
+        width = min(lo + _ADAPTER_CHUNK, n_windows) - lo
+        maybe = np.empty(width, dtype=np.uint8)
+        mm = np.empty(width, dtype=np.uint8)
+        scratch = np.empty(n_budgets, dtype=np.int8)
+        _adapter_maybe(sequence, adapter, min_match, skip, reverse, lo, width, maybe, mm)
+        out = offsets[chunk]
+        for i in range(width):
+            if maybe[i] and _adapter_scan(sequence, adapter, min_match, skip, reverse, lo + i, scratch):
+                starts[out] = lo + i
+                for b in range(n_budgets):
+                    lengths[out, b] = scratch[b]
+                out += 1
+    return starts, lengths
+
+
+# ---------------------------------------------------------------------------
+# Motif matching
+# ---------------------------------------------------------------------------
+
+_MOTIF_CHUNK = 1 << 16
+#: Longest motif ``motif_window_mask`` handles: counts live in the low 7 bits
+#: of a uint8, with the top bit marking a non-A/C/G/T base.
+MAX_MASK_MOTIF_LENGTH = 127
+
+
+@njit(parallel=True, cache=True)
+def sequence_codes(sequence, lut):
+    """``lut[sequence]`` (byte -> base code), in parallel."""
+    out = np.empty(sequence.shape[0], dtype=np.uint8)
+    for i in prange(sequence.shape[0]):
+        out[i] = lut[sequence[i]]
+    return out
+
+
+@njit(parallel=True, cache=True)
+def motif_window_mask(codes, pattern, max_mismatches):
+    """Whether each window of ``codes`` matches ``pattern`` within Hamming distance.
+
+    ``codes`` holds one base code per position (A=0, C=1, G=2, T=3, any case;
+    4 for anything else; see ``kackle.motifs._sequence_codes``) and
+    ``pattern`` the motif's codes (0-3), at most ``MAX_MASK_MOTIF_LENGTH``
+    long. Entry ``p`` is true when ``codes[p:p + k]`` is all A/C/G/T and at
+    most ``max_mismatches`` bases differ from the pattern, for ``p`` in
+    ``[0, len(codes) - k]``. ``kackle.motifs._python_window_starts`` is the
+    independent reference this is tested against, and the fallback when numba
+    JIT is disabled.
+
+    Each chunk of windows counts its mismatches one pattern column at a time
+    over contiguous slices, so the inner loop is branch-free and vectorizes.
+    The count stays in the low 7 bits of a uint8; a non-A/C/G/T base sets the
+    top bit, which no later addition can clear, so that window never passes.
+    """
+    k = pattern.shape[0]
+    n_windows = codes.shape[0] - k + 1
+    if k == 0 or n_windows <= 0:
+        return np.zeros(0, dtype=np.bool_)
+    out = np.empty(n_windows, dtype=np.bool_)
+    n_chunks = (n_windows + _MOTIF_CHUNK - 1) // _MOTIF_CHUNK
     for chunk in prange(n_chunks):
         lo = chunk * _MOTIF_CHUNK
-        hi = min(lo + _MOTIF_CHUNK, n_windows)
-        out = offsets[chunk]
-        for start in range(lo, hi):
-            if _window_matches(sequence, start, pattern, max_mismatches):
-                starts[out] = start
-                out += 1
-    return starts
+        width = min(lo + _MOTIF_CHUNK, n_windows) - lo
+        counts = np.zeros(width, dtype=np.uint8)
+        for j in range(k):
+            column = codes[lo + j : lo + j + width]
+            pj = pattern[j]
+            for i in range(width):
+                c = column[i]
+                counts[i] = (counts[i] + (c != pj)) | ((c >> 2) << 7)
+        window = out[lo : lo + width]
+        for i in range(width):
+            window[i] = counts[i] <= max_mismatches
+    return out

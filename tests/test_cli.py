@@ -42,6 +42,19 @@ def test_auto_worker_resolution_respects_numba_thread_budget(monkeypatch):
     assert numba_threads == 4
 
 
+def test_thread_budget_follows_cpu_affinity_not_machine_size(monkeypatch):
+    # A Slurm job on a big node: os.cpu_count() is the machine, the job gets 3.
+    from numba import config
+
+    monkeypatch.delenv("NUMBA_NUM_THREADS", raising=False)
+    monkeypatch.setattr(cli.os, "cpu_count", lambda: 256)
+    monkeypatch.setattr(cli.os, "sched_getaffinity", lambda pid: {0, 1, 2}, raising=False)
+    assert cli.thread_budget() == min(3, config.NUMBA_NUM_THREADS)
+    # Never more than numba allows.
+    monkeypatch.setattr(cli.os, "sched_getaffinity", lambda pid: set(range(10_000)), raising=False)
+    assert cli.thread_budget() == config.NUMBA_NUM_THREADS
+
+
 def test_intersect_chrom_sizes_preserves_chrom_size_order():
     chrom_sizes = [("chr1", 10), ("chr2", 20), ("chr3", 30)]
 

@@ -17,6 +17,8 @@ set an exact search over all A/C/G/T Hamming variants of the motif finds, so
 windows containing N or IUPAC codes never match.
 """
 
+import os
+import threading
 import warnings
 from dataclasses import dataclass, field
 from itertools import combinations, product
@@ -98,6 +100,30 @@ def open_fasta(path):
     return pyfaidx.Fasta(str(path), as_raw=True)
 
 
+_THREAD_FASTA = threading.local()
+
+
+def thread_fasta(path):
+    """This thread's open :func:`open_fasta` handle for ``path``, reused across calls.
+
+    pyfaidx handles aren't thread-safe and opening one parses the ``.fai``
+    (tens of ms for a large genome), which used to happen for every chunk.
+    One handle per thread and file is kept open; it is replaced when the
+    FASTA's size or modification time changes.
+    """
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    handles = getattr(_THREAD_FASTA, "handles", None)
+    if handles is None:
+        handles = _THREAD_FASTA.handles = {}
+    fasta = handles.get(key)
+    if fasta is None:
+        for old in [k for k in handles if k[0] == key[0]]:
+            handles.pop(old).close()
+        fasta = handles[key] = open_fasta(path)
+    return fasta
+
+
 def fasta_chrom_names(path):
     """Return FASTA record names in file order, read from the ``.fai`` index."""
     fasta = open_fasta(path)
@@ -157,9 +183,18 @@ def _validate_motif(motif):
     return motif
 
 
-def _sequence_bytes(sequence):
-    """ASCII bytes of ``sequence`` as uint8 (non-ASCII characters become '?')."""
-    return np.frombuffer(sequence.encode("ascii", "replace"), dtype=np.uint8)
+#: Byte -> base code for the numba matcher: A=0, C=1, G=2, T=3 (any case), 4 otherwise.
+_BASE_CODES = np.full(256, 4, dtype=np.uint8)
+for _code, _base in enumerate("ACGT"):
+    _BASE_CODES[ord(_base)] = _BASE_CODES[ord(_base.lower())] = _code
+
+
+def _sequence_codes(sequence):
+    """Base codes of ``sequence`` (see ``_BASE_CODES``; non-ASCII characters give 4)."""
+    from kackle.computation import sequence_codes
+
+    raw = np.frombuffer(sequence.encode("ascii", "replace"), dtype=np.uint8)
+    return sequence_codes(raw, _BASE_CODES)
 
 
 def _python_window_starts(sequence_upper, pattern, max_mismatches):
@@ -179,18 +214,22 @@ def _python_window_starts(sequence_upper, pattern, max_mismatches):
 
 
 def _window_starts(encoded, pattern, max_mismatches, match_backend):
-    """Dispatch to a matcher. ``encoded`` is uint8 bytes, or an uppercase str for python."""
+    """Dispatch to a matcher. ``encoded`` is base codes, or an uppercase str for python."""
     if match_backend == "python":
         return _python_window_starts(encoded, pattern, max_mismatches)
-    from kackle.computation import motif_window_starts
+    from kackle.computation import MAX_MASK_MOTIF_LENGTH, motif_window_mask
 
-    return motif_window_starts(
-        encoded, np.frombuffer(pattern.encode("ascii"), dtype=np.uint8), max_mismatches
-    )
+    if len(pattern) > MAX_MASK_MOTIF_LENGTH:
+        raise ValueError(f"motifs longer than {MAX_MASK_MOTIF_LENGTH} bases are not supported")
+    codes = _BASE_CODES[np.frombuffer(pattern.encode("ascii"), dtype=np.uint8)]
+    # More mismatches than bases allows any all-A/C/G/T window; clamp so the
+    # kernel's invalid-base bit (128) still exceeds the limit.
+    mask = motif_window_mask(encoded, codes, min(max_mismatches, len(pattern)))
+    return np.flatnonzero(mask).astype(np.int64)
 
 
 def _encode_for(sequence, match_backend):
-    return sequence.upper() if match_backend == "python" else _sequence_bytes(sequence)
+    return sequence.upper() if match_backend == "python" else _sequence_codes(sequence)
 
 
 def locate_motif_starts(
@@ -365,7 +404,6 @@ class FastaMotifSiteProvider:
     both_strands: bool = True
     match_backend: MatchBackend = "auto"
     bed6_fnames: list[str] | None = None
-    _pyfaidx_fasta: object | None = field(default=None, init=False, repr=False)
     _written_chroms: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self):
@@ -373,7 +411,7 @@ class FastaMotifSiteProvider:
         self.match_backend = resolve_match_backend(self.match_backend)
         # Build (or refresh) the .fai up front, in the calling process, so
         # concurrent chromosome workers never race to write it.
-        open_fasta(self.fasta_fname).close()
+        thread_fasta(self.fasta_fname)
         parsed_specs = []
         for spec in self.motif_specs:
             if isinstance(spec, MotifSpec):
@@ -388,18 +426,11 @@ class FastaMotifSiteProvider:
             for bed6_fname in self.bed6_fnames:
                 open(bed6_fname, "w").close()
 
-    def __getstate__(self):
-        # The pyfaidx handle is reopened lazily; don't pickle it to workers.
-        state = self.__dict__.copy()
-        state["_pyfaidx_fasta"] = None
-        return state
-
     def _record(self, chrom):
-        if self._pyfaidx_fasta is None:
-            self._pyfaidx_fasta = open_fasta(self.fasta_fname)
-        if chrom not in self._pyfaidx_fasta:
+        fasta = thread_fasta(self.fasta_fname)
+        if chrom not in fasta:
             raise KeyError(f"Chromosome {chrom!r} not found in {self.fasta_fname}")
-        return self._pyfaidx_fasta[chrom]
+        return fasta[chrom]
 
     def sequence(self, chrom, start=None, end=None):
         """Return the requested chromosome sequence, or ``[start, end)`` of it."""

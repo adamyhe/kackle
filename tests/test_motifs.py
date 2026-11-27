@@ -1,3 +1,5 @@
+from itertools import product
+
 import pytest
 
 from kackle.motifs import (
@@ -228,14 +230,22 @@ def brute_force_starts(sequence, pattern, max_mismatches):
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize(
     "motif,max_mismatches",
-    [("TGG", 0), ("TGGAA", 1), ("TGGAA", 2), ("ACGT", 1), ("A", 0), ("GATTACA", 7)],
+    [
+        ("TGG", 0), ("TGGAA", 1), ("TGGAA", 2), ("ACGT", 1), ("A", 0), ("GATTACA", 7),
+        # More mismatches than bases, and a 12-mer with every mismatch allowed:
+        # windows with many N's must still never match.
+        ("TGG", 5), ("TGGAATTCTCGG", 11),
+    ],
 )
 def test_locate_motif_starts_matches_brute_force(backend, motif, max_mismatches):
+    if backend == "python" and len(motif) > 8 and max_mismatches > 2:
+        # The python matcher expands every mismatch variant (~16.7M here).
+        pytest.skip("too many mismatch variants for the python reference matcher")
     rng = np.random.default_rng(len(motif) * 10 + max_mismatches)
     # Mostly ACGT in both cases, with N, IUPAC codes, a gap character and a
     # non-ASCII character mixed in. ACGT is palindromic: + and - hits coincide.
-    alphabet = list("ACGTACGTacgtNnMR-é")
-    for length in (0, 1, len(motif) - 1, len(motif), 50, 400):
+    alphabets = [list("ACGTACGTacgtNnMR-é"), list("ACGTNNNNNN")]
+    for alphabet, length in product(alphabets, (0, 1, len(motif) - 1, len(motif), 50, 400)):
         sequence = "".join(rng.choice(alphabet, max(length, 0)))
         got = locate_motif_starts(
             sequence, motif, max_mismatches, match_backend=backend
@@ -245,6 +255,36 @@ def test_locate_motif_starts_matches_brute_force(backend, motif, max_mismatches)
         assert got["-"].tolist() == brute_force_starts(sequence, rc, max_mismatches)
         for strand in "+-":
             assert got[strand].dtype == np.int64
+
+
+def test_numba_matcher_rejects_motifs_over_127_bases():
+    from kackle.computation import MAX_MASK_MOTIF_LENGTH
+
+    ok = "A" * MAX_MASK_MOTIF_LENGTH
+    assert locate_motif_starts(ok * 2, ok, 0, match_backend="numba")["+"].tolist() == list(range(128))
+    with pytest.raises(ValueError):
+        locate_motif_starts("A" * 300, "A" * 128, 0, match_backend="numba")
+
+
+def test_thread_fasta_reuses_a_handle_until_the_file_changes(tmp_path):
+    import os
+    import threading
+
+    from kackle.motifs import thread_fasta
+
+    fasta = tmp_path / "g.fa"
+    fasta.write_text(">chr1\nACGT\n")
+    first = thread_fasta(fasta)
+    assert thread_fasta(fasta) is first
+    other = []
+    t = threading.Thread(target=lambda: other.append(thread_fasta(fasta)))
+    t.start()
+    t.join()
+    assert other[0] is not first  # one handle per thread
+    fasta.write_text(">chr1\nACGTTT\n")
+    os.utime(fasta, ns=(1, 1))
+    os.remove(str(fasta) + ".fai")
+    assert str(thread_fasta(fasta)["chr1"][:]) == "ACGTTT"
 
 
 def test_numba_kernel_spans_chunk_boundaries():

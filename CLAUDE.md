@@ -68,8 +68,8 @@ outside motif windows, and isolated windows must keep their sums. It compares in
 
 - `computation.py` — numba hot-path kernels only (`artifact_mask_serial/parallel`,
   `resample_dirmult`, `resample_empirical`, `correct_kmers`, the base-only kernels
-  `correct_artifact_bases` and `correct_adapter_sites`, the motif matcher `motif_window_starts`, and
-  the adapter matcher `adapter_match_lengths`). No pandas, no file I/O, no Python
+  `correct_artifact_bases` and `correct_adapter_sites`, the motif matcher `motif_window_mask` (on `sequence_codes` base codes), and
+  the adapter matchers `adapter_candidates` (pipeline) and `adapter_match_lengths` (reference)). No pandas, no file I/O, no Python
   objects beyond NumPy arrays — these are `@njit` compiled and must stay numba-compatible.
 - `motifs.py` — motif spec parsing (`KMER[:MISMATCHES]`), `locate_motif_starts` (sorted int64
   start arrays per strand; backends `numba`, the default, and `python`, which runs `str.find`
@@ -191,7 +191,8 @@ Two independent levels of parallelism interact and must not oversubscribe CPUs:
   `auto` resolves to `min(chrom_count, thread_budget(), 4)`. Process pools use the `spawn` context:
   the parent holds figwig writer threads, and forking a multi-threaded process crashes workers.
 - **Within-chromosome (numba)**: `numba_threads`, set per worker via `numba.set_num_threads()`.
-  `auto` divides `thread_budget()` (honors `NUMBA_NUM_THREADS` env var, else `os.cpu_count()`)
+  `auto` divides `thread_budget()` (honors `NUMBA_NUM_THREADS` env var, else `available_cpus()`: the
+  CPU affinity, capped at numba's limit; not `os.cpu_count()`, which counts a whole Slurm node)
   across `chrom_workers` so the two levels don't multiply out past available CPUs.
 
 `--worker-backend process` is the CLI default (separate interpreters help with FASTA/pandas/numba
