@@ -71,7 +71,7 @@ def resolve_chrom_workers(chrom_workers, chrom_count):
 
 
 def thread_budget():
-    """Return the available thread budget, honoring NUMBA_NUM_THREADS."""
+    """Return the available thread budget: NUMBA_NUM_THREADS, else :func:`available_cpus`."""
     numba_threads = os.environ.get("NUMBA_NUM_THREADS")
     if numba_threads is not None:
         try:
@@ -80,7 +80,28 @@ def thread_budget():
             parsed = 0
         if parsed > 0:
             return parsed
-    return os.cpu_count() or 1
+    return available_cpus()
+
+
+def available_cpus():
+    """CPUs this process may run on, as numba sees them.
+
+    On a Slurm node ``os.cpu_count()`` counts the whole machine (e.g. 256)
+    while the job may use only a few; numba then refuses more threads than
+    that (its default limit follows the CPU affinity), so a budget from
+    ``os.cpu_count()`` crashed ``set_num_threads``.
+    """
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = os.cpu_count() or 1
+    try:
+        from numba import config
+
+        cpus = min(cpus, int(config.NUMBA_NUM_THREADS))
+    except Exception:  # pragma: no cover - numba is a dependency
+        pass
+    return max(1, cpus)
 
 
 def resolve_numba_threads(numba_threads, chrom_workers):
