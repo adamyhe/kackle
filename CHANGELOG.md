@@ -34,6 +34,20 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   1-mismatch 5–7-base class from 0.45–0.50 to 0.80–0.90 of its flank, left
   every other class unchanged, and removed about 0.26 points less signal.
 
+- **Site location is 6.6× faster in motif mode and 3.6× in `--adapter`
+  mode**, with the same sites. On hg38 (PROseq_2, 16 cores, warm numba cache)
+  a default run takes 7.7 s instead of 16.8 s and about 100 CPU-s instead of
+  237; `--adapter` 9.9 s instead of 18.2 s (136 CPU-s instead of 263).
+  Location was 82% of worker time. The motif matcher
+  (`motif_window_mask`) now scans precomputed base codes one motif column at a
+  time, which vectorizes, instead of checking each window in turn; the
+  adapter matcher (`adapter_candidates`) rejects most windows with a
+  vectorized check on the first bases, matches the minus strand in place
+  instead of reverse-complementing the sequence, and returns only
+  candidates. Each thread keeps one open FASTA handle (`thread_fasta`)
+  instead of reopening the index for every chunk. Motifs longer than 127
+  bases are no longer supported by the numba matcher.
+
 ### Fixed
 
 - `--adapter` tiers with a mismatch limit (such as the default `4/0:7`)
@@ -44,6 +58,11 @@ change behavior). Planned work and known issues live in [ROADMAP.md](ROADMAP.md)
   tier's length has at most its mismatches. `adapter_match_lengths` returns
   the longest match for each mismatch budget. This changes default
   `--adapter` output.
+- The default thread budget (`-w auto`, `--numba-threads auto`, writer
+  threads) came from `os.cpu_count()`, which on a Slurm node counts the whole
+  machine; without `NUMBA_NUM_THREADS` set, numba then refused the thread
+  count and the run failed. It now uses the CPUs the process may run on,
+  capped at numba's limit.
 
 ## [0.3.0] - 2026-11-18
 

@@ -179,18 +179,32 @@ Open:
 
 ## Performance
 
-0.3.0 replaced the old bottleneck, motif location (69% of a serial run
-before), with a numba matcher, and added streamed both-strand output and
-`--chunk-size`; numbers are in the CHANGELOG. On hg38 (PROseq_2), `kackle`
-takes 17–30 s at `-w 4` to `-w 16` with about 0.8 GB per process, and levels
-off around 17–20 s, which is likely fixed costs: spawning workers, cut
-planning in the parent, and writing.
+Profiled on hg38 (PROseq_2, one 16-core node; `kackle_realdata/results/floor`
+and `results/matcher`, timeline harness `scripts/floor_timing.py`). The 0.3.0
+"floor" of about 17 s at `-w 16` was not fixed costs: start-up, chunk
+planning and writing together take about 3.5 s, and 82% of worker time
+(169 of 205 CPU-s) was site location. Since the faster matchers (Unreleased),
+a default run takes 7.7 s and about 100 CPU-s, `--adapter` 9.9 s and 136
+CPU-s. Worker time is now location 25, correction kernels 30, reads 8, and
+sparsifying and dtype conversion 11 CPU-s.
+
+For many samples (e.g. reprocessing a large collection):
+
+- **Keep the numba cache between jobs.** With an empty cache every worker
+  compiles the kernels itself (about 8 s each), which cost 41 s of wall time
+  and about 155 CPU-s per run. Point `NUMBA_CACHE_DIR` at one persistent
+  directory (or install kackle where its `__pycache__` is writable).
+- **Run several samples per node.** Four samples at once with `-w 4` each
+  took 23 s, about 6 s per sample and 87 CPU-s each, against 7.7 s per sample
+  one at a time at `-w 16`. CPU per sample, not wall time per run, is the
+  cost that adds up.
 
 Remaining, roughly in order of payoff:
 
-1. **Profile the remaining `kackle` floor** (about 17 s at `-w 16`) before
-   optimizing further: worker start-up, cut planning, bigWig reading and
-   writing.
+1. **Locate sites once per genome.** Location is still about 25 CPU-s per
+   sample in motif mode (50 in adapter mode) and doesn't depend on the
+   sample. A binary per-genome site cache would remove it; BED6 text (`-b`)
+   is not the answer, since parsing 230M rows is likely slower than locating.
 2. **Dense float64 reads.** Each chunk's strand is read as a dense float64
    array and converted to int32 (about 120 MB per 10 Mb chunk). Reading as
    int32 directly, or reading covered intervals, would cut the per-worker

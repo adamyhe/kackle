@@ -175,6 +175,46 @@ def test_leading_ns_are_skipped(tmp_path):
     assert sum(len(d["+"]) for d in got) < n // 10
 
 
+@pytest.mark.parametrize(
+    "adapter,min_match,skip",
+    [(ADAPTER, (3, 5), 0), (ADAPTER, (4,), 0), ("TGGNATTC", (3, 4, 7), 0),
+     ("NNNNNN" + ADAPTER, (3, 5), 6), ("TGG", (1, 2, 3), 0), ("NNTGGAA", (5, 5), 2)],
+)
+def test_adapter_candidates_match_reference_kernel(adapter, min_match, skip):
+    from kackle.adapter import _COMPLEMENT, sequence_masks
+    from kackle.computation import adapter_candidates, adapter_match_lengths
+
+    rng = np.random.default_rng(len(adapter) + skip)
+    masks = adapter_masks(adapter)
+    mm = np.array(min_match, dtype=np.int64)
+    # Adapter-rich random sequence crossing several 65,536-window chunks.
+    seq = list(rng.choice(list("ACGTacgtN"), 200_000, p=[0.24] * 4 + [0.009] * 4 + [0.004]))
+    for pos in rng.integers(0, len(seq) - 20, 8_000):
+        piece = list(ADAPTER[: rng.integers(3, 13)])
+        if rng.random() < 0.5:
+            piece[rng.integers(0, len(piece))] = rng.choice(list("ACGT"))
+        if rng.random() < 0.5:
+            piece = list("".join(piece).translate(COMP)[::-1])
+        seq[pos : pos + len(piece)] = piece
+    seq = sequence_masks("".join(seq))
+    n_full = None
+    for sub in (seq, seq[:0], seq[: len(adapter) - 1], seq[: len(adapter)], seq[:1000]):
+        ref = adapter_match_lengths(sub, masks, mm, skip)
+        want = np.flatnonzero(ref[:, -1])
+        n_full = len(want) if n_full is None else n_full
+        starts, lengths = adapter_candidates(sub, masks, mm, skip, False)
+        assert starts.tolist() == want.tolist()
+        assert np.array_equal(lengths, ref[want])
+        # Minus strand: in place with complemented masks == the reversed
+        # reverse complement, mapped back to genomic window starts.
+        rc_ref = adapter_match_lengths(_COMPLEMENT[sub[::-1]], masks, mm, skip)
+        q = np.flatnonzero(rc_ref[:, -1])[::-1]
+        starts, lengths = adapter_candidates(sub, _COMPLEMENT[masks], mm, skip, True)
+        assert starts.tolist() == (rc_ref.shape[0] - 1 - q).tolist()
+        assert np.array_equal(lengths, rc_ref[q])
+    assert n_full > 1_000
+
+
 def test_leading_ns_count_toward_window_not_length():
     from kackle.adapter import adapter_masks, sequence_masks
     from kackle.computation import adapter_match_lengths
